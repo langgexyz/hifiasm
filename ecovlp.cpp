@@ -6,6 +6,7 @@
 #include "ecovlp.h"
 #include "kthread.h"
 #include "htab.h"
+#include "ckpt.h"
 #define HA_KMER_GOOD_RATIO 0.333
 #define E_KHIT 31
 #define CNS_DEL_E (0x7fffffffu)
@@ -63,6 +64,8 @@ typedef struct {
 	ec_ovec_buf_t0 *a;
 	uint32_t n, rev;
     uint8_t *cr;
+	ha_ckpt_stream_t *ck;
+    uint8_t *ck_done;
 } ec_ovec_buf_t;
 
 typedef struct {
@@ -99,7 +102,6 @@ KRADIX_SORT_INIT(ec64, uint64_t, generic_key, 8)
 
 #define kdq_clear(q) ((q)->count = (q)->front = 0)
 
-typedef struct {size_t n, m; asg16_v *a; uint8_t *f; } cc_v;
 cc_v scc = {0, 0, NULL, NULL};
 cc_v scb = {0, 0, NULL, NULL};
 cc_v sca = {0, 0, NULL, NULL};
@@ -3233,6 +3235,8 @@ uint32_t is_chemical_r_qual(overlap_region_alloc *ov, asg64_v *idx, int64_t len,
 
 static void worker_hap_ec(void *data, long i, int tid)
 {
+	ec_ovec_buf_t *dd = (ec_ovec_buf_t*)data;
+	if (dd->ck_done && dd->ck_done[i]) return;
 	ec_ovec_buf_t0 *b = &(((ec_ovec_buf_t*)data)->a[tid]);
     uint32_t high_occ = asm_opt.hom_cov * (2.0 - HA_KMER_GOOD_RATIO);
     uint32_t low_occ = asm_opt.hom_cov * HA_KMER_GOOD_RATIO;
@@ -3389,6 +3393,7 @@ static void worker_hap_ec(void *data, long i, int tid)
     // fprintf(stderr, "[M::%s-end] rid->%ld\n", __func__, i);
     **/
     // exit(1);
+    if (dd->ck) ha_ckpt_dump_ec(dd->ck, i);
     refresh_ec_ovec_buf_t0(b, REFRESH_N);
 
     /**
@@ -3948,6 +3953,8 @@ static void worker_hap_dc_ec_gen(void *data, long i, int tid)
 static void worker_hap_dc_ec_gen_new_idx(void *data, long i, int tid)
 {
     
+    ec_ovec_buf_t *dd = (ec_ovec_buf_t*)data;
+	if (dd->ck_done && dd->ck_done[i]) return;
     ec_ovec_buf_t0 *b = &(((ec_ovec_buf_t*)data)->a[tid]);
     uint32_t high_occ = asm_opt.hom_cov * (2.0 - HA_KMER_GOOD_RATIO);
     uint32_t low_occ = asm_opt.hom_cov * HA_KMER_GOOD_RATIO; uint32_t qlen = 0;
@@ -3988,6 +3995,7 @@ static void worker_hap_dc_ec_gen_new_idx(void *data, long i, int tid)
     }
     copy_asg_arr(b->sp, buf0);
     **/
+   if (dd->ck) ha_ckpt_dump_ov(dd->ck, i);
    refresh_ec_ovec_buf_t0(b, REFRESH_N);
 }
 
@@ -6075,7 +6083,10 @@ uint64_t cal_ec_multiple(ec_ovec_buf_t *b, uint64_t n_thre, uint64_t n_a, uint64
 
     for (k = 0; k < n_thre; ++k) b->a[k].cnt[0] = b->a[k].cnt[1] = 0;
 
+    b->ck = ha_ckpt_stream_open(HA_CKPT_STAGE_EC, asm_opt.roundID, n_a);
+    b->ck_done = b->ck ? b->ck->done : NULL;
     kt_for(n_thre, worker_hap_ec, b, n_a);///debug_for_fix
+    ha_ckpt_stream_close(b->ck); b->ck = NULL; b->ck_done = NULL;
 
     for (k = 0; k < n_thre; ++k) {
         num_base += b->a[k].cnt[0];
@@ -6159,7 +6170,10 @@ void ha_print_ovlp_stat_0(ec_ovec_buf_t *b, uint64_t n_thre, uint64_t n_a)
         b->a[k].cnt[0] = b->a[k].cnt[1] = b->a[k].cnt[2] = b->a[k].cnt[3] = b->a[k].cnt[4] = b->a[k].cnt[5] = 0;
     }
 
+    b->ck = ha_ckpt_stream_open(HA_CKPT_STAGE_OV, asm_opt.number_of_round, n_a);
+    b->ck_done = b->ck ? b->ck->done : NULL;
     kt_for(n_thre, worker_hap_dc_ec_gen_new_idx, b, n_a);
+    ha_ckpt_stream_close(b->ck); b->ck = NULL; b->ck_done = NULL;
 
     for (k = 0; k < n_thre; ++k) {
         forward += b->a[k].cnt[0];

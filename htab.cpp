@@ -1682,3 +1682,14 @@ int uidx_load(void **r_flt_tab, ha_pt_t **r_ha_idx, char* file_name, ma_ug_t *ug
     free(gfa_name);
     return 1;
 }
+
+int ckpt_ft_save(void *h, FILE *fp)
+{
+	if (!h) return 0;
+	return yak_ft_save((yak_ft_t*)h, fp) != 0 ? 1 : 0;
+}
+
+int ckpt_ft_load(void **rh, FILE *fp)
+{
+	return yak_ft_load((yak_ft_t**)rh, fp) != 0 ? 1 : 0;
+}

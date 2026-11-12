@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
+#include <unistd.h>
+#include <zlib.h>
 #include "Process_Read.h"
 #include "htab.h"
 #include "Correct.h"
@@ -66,18 +68,24 @@ void destory_All_reads(All_reads* r)
 	///if (r->pb_regions) free(r->pb_regions);
 }
 
-void write_All_reads(All_reads* r, char* read_file_name)
+#define CKPT_W_FP(p, n, c) do { \
+	fwrite((p), 1, (n), fp); \
+	if (c) *(c) = crc32(*(c), (const Bytef*)(p), (uInt)(n)); \
+} while (0)
+
+#define CKPT_R_FP(p, n, c) do { \
+	if (fread((p), 1, (n), fp) != (size_t)(n)) return 0; \
+	if (c) *(c) = crc32(*(c), (const Bytef*)(p), (uInt)(n)); \
+} while (0)
+
+void write_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
 {
-    fprintf(stderr, "Writing reads to disk... \n");
-    char* index_name = (char*)malloc(strlen(read_file_name)+15);
-    sprintf(index_name, "%s.bin", read_file_name);
-    FILE* fp = fopen(index_name, "w");
-	fwrite(&asm_opt.adapterLen, sizeof(asm_opt.adapterLen), 1, fp);
-    fwrite(&r->index_size, sizeof(r->index_size), 1, fp);
-	fwrite(&r->name_index_size, sizeof(r->name_index_size), 1, fp);
-	fwrite(&r->total_reads, sizeof(r->total_reads), 1, fp);
-	fwrite(&r->total_reads_bases, sizeof(r->total_reads_bases), 1, fp);
-	fwrite(&r->total_name_length, sizeof(r->total_name_length), 1, fp);
+	CKPT_W_FP(&asm_opt.adapterLen, sizeof(asm_opt.adapterLen), crc);
+    CKPT_W_FP(&r->index_size, sizeof(r->index_size), crc);
+	CKPT_W_FP(&r->name_index_size, sizeof(r->name_index_size), crc);
+	CKPT_W_FP(&r->total_reads, sizeof(r->total_reads), crc);
+	CKPT_W_FP(&r->total_reads_bases, sizeof(r->total_reads_bases), crc);
+	CKPT_W_FP(&r->total_name_length, sizeof(r->total_name_length), crc);
 
 	uint64_t i = 0;
 	uint64_t zero = 0;
@@ -86,74 +94,78 @@ void write_All_reads(All_reads* r, char* read_file_name)
 		if (r->N_site[i] != NULL)
 		{
 			///number of Ns
-			fwrite(&r->N_site[i][0], sizeof(r->N_site[i][0]), 1, fp);
+			CKPT_W_FP(&r->N_site[i][0], sizeof(r->N_site[i][0]), crc);
 			if (r->N_site[i][0])
 			{
-				fwrite(r->N_site[i]+1, sizeof(r->N_site[i][0]), r->N_site[i][0], fp);
+				CKPT_W_FP(r->N_site[i]+1, sizeof(r->N_site[i][0]) * (size_t)r->N_site[i][0], crc);
 			}
 		}
 		else
 		{
-			fwrite(&zero, sizeof(zero), 1, fp);
+			CKPT_W_FP(&zero, sizeof(zero), crc);
 		}
 	}
 
-	fwrite(r->read_length, sizeof(uint64_t), r->total_reads, fp);
+	CKPT_W_FP(r->read_length, sizeof(uint64_t)*(size_t)r->total_reads, crc);
 	for (i = 0; i < r->total_reads; i++)
 	{
-		fwrite(r->read_sperate[i], sizeof(uint8_t), r->read_length[i]/4+1, fp);
+		CKPT_W_FP(r->read_sperate[i], sizeof(uint8_t)*(size_t)(r->read_length[i]/4+1), crc);
 	}
 	
-	fwrite(r->name, sizeof(char), r->total_name_length, fp);
-	fwrite(r->name_index, sizeof(uint64_t), r->name_index_size, fp);
-	fwrite(r->trio_flag, sizeof(uint8_t), r->total_reads, fp);
-	fwrite(&(asm_opt.hom_cov), sizeof(asm_opt.hom_cov), 1, fp);
-	fwrite(&(asm_opt.het_cov), sizeof(asm_opt.het_cov), 1, fp);
+	CKPT_W_FP(r->name, sizeof(char)*(size_t)r->total_name_length, crc);
+	CKPT_W_FP(r->name_index, sizeof(uint64_t)*(size_t)r->name_index_size, crc);
+	CKPT_W_FP(r->trio_flag, sizeof(uint8_t)*(size_t)r->total_reads, crc);
+	CKPT_W_FP(&(asm_opt.hom_cov), sizeof(asm_opt.hom_cov), crc);
+	CKPT_W_FP(&(asm_opt.het_cov), sizeof(asm_opt.het_cov), crc);
 
 	uint64_t mm = 1;
 	if(asm_opt.is_sc) {
-		fwrite(&mm, sizeof(mm), 1, fp);
+		CKPT_W_FP(&mm, sizeof(mm), crc);
 		for (i = 0; i < r->total_reads; i++) {
-			fwrite(r->rsc[i], sizeof(uint8_t), ((r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0)), fp);
+			CKPT_W_FP(r->rsc[i], sizeof(uint8_t)*(size_t)((r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0)), crc);
 		}
 	}
+}
 
-    free(index_name);    
+void write_All_reads(All_reads* r, char* read_file_name)
+{
+    fprintf(stderr, "Writing reads to disk... \n");
+    char* index_name = (char*)malloc(strlen(read_file_name)+15);
+    sprintf(index_name, "%s.bin", read_file_name);
+	char* tmp_name = (char*)malloc(strlen(index_name)+8);
+    sprintf(tmp_name, "%s.tmp", index_name);
+    FILE* fp = fopen(tmp_name, "w");
+	write_All_reads_fp(r, fp, NULL);
 	fflush(fp);
+	fsync(fileno(fp));
     fclose(fp);
+	if (rename(tmp_name, index_name) != 0) unlink(tmp_name);
+    free(index_name); free(tmp_name);
     fprintf(stderr, "Reads has been written.\n");
 }
 
-int load_All_reads(All_reads* r, char* read_file_name)
+int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
 {
-    char* index_name = (char*)malloc(strlen(read_file_name)+15);
-    sprintf(index_name, "%s.bin", read_file_name);
-    FILE* fp = fopen(index_name, "r");
-	if (!fp) {
-		free(index_name);
-        return 0;
-    }
 	int local_adapterLen;
-	int f_flag;
-    f_flag = fread(&local_adapterLen, sizeof(local_adapterLen), 1, fp);
+    CKPT_R_FP(&local_adapterLen, sizeof(local_adapterLen), crc);
     if(local_adapterLen != asm_opt.adapterLen)
     {
         fprintf(stderr, "the adapterLen of index is: %d, but the adapterLen set by user is: %d\n", 
         local_adapterLen, asm_opt.adapterLen);
 		exit(1);
     }
-    f_flag += fread(&r->index_size, sizeof(r->index_size), 1, fp);
-	f_flag += fread(&r->name_index_size, sizeof(r->name_index_size), 1, fp);
-	f_flag += fread(&r->total_reads, sizeof(r->total_reads), 1, fp);
-	f_flag += fread(&r->total_reads_bases, sizeof(r->total_reads_bases), 1, fp);
-	f_flag += fread(&r->total_name_length, sizeof(r->total_name_length), 1, fp);
+    CKPT_R_FP(&r->index_size, sizeof(r->index_size), crc);
+	CKPT_R_FP(&r->name_index_size, sizeof(r->name_index_size), crc);
+	CKPT_R_FP(&r->total_reads, sizeof(r->total_reads), crc);
+	CKPT_R_FP(&r->total_reads_bases, sizeof(r->total_reads_bases), crc);
+	CKPT_R_FP(&r->total_name_length, sizeof(r->total_name_length), crc);
 
 	uint64_t i = 0;
 	uint64_t zero = 0;
 	r->N_site = (uint64_t**)malloc(sizeof(uint64_t*)*r->total_reads);
 	for (i = 0; i < r->total_reads; i++)
 	{
-		f_flag += fread(&zero, sizeof(zero), 1, fp);
+		CKPT_R_FP(&zero, sizeof(zero), crc);
 
 		if (zero)
 		{
@@ -161,7 +173,7 @@ int load_All_reads(All_reads* r, char* read_file_name)
 			r->N_site[i][0] = zero;
 			if (r->N_site[i][0])
 			{
-				f_flag += fread(r->N_site[i]+1, sizeof(r->N_site[i][0]), r->N_site[i][0], fp);
+				CKPT_R_FP(r->N_site[i]+1, sizeof(r->N_site[i][0])*(size_t)r->N_site[i][0], crc);
 			}
 		}
 		else
@@ -171,7 +183,7 @@ int load_All_reads(All_reads* r, char* read_file_name)
 	}
 
 	r->read_length = (uint64_t*)malloc(sizeof(uint64_t)*r->total_reads);
-	f_flag += fread(r->read_length, sizeof(uint64_t), r->total_reads, fp);
+	CKPT_R_FP(r->read_length, sizeof(uint64_t)*(size_t)r->total_reads, crc);
 
 	r->read_size = (uint64_t*)malloc(sizeof(uint64_t)*r->total_reads);
 	memcpy (r->read_size, r->read_length, sizeof(uint64_t)*r->total_reads);
@@ -180,21 +192,21 @@ int load_All_reads(All_reads* r, char* read_file_name)
 	for (i = 0; i < r->total_reads; i++)
     {
 		r->read_sperate[i] = (uint8_t*)malloc(sizeof(uint8_t)*(r->read_length[i]/4+1));
-		f_flag += fread(r->read_sperate[i], sizeof(uint8_t), r->read_length[i]/4+1, fp);
+		CKPT_R_FP(r->read_sperate[i], sizeof(uint8_t)*(size_t)(r->read_length[i]/4+1), crc);
 	}
 
 
 	r->name = (char*)malloc(sizeof(char)*r->total_name_length);
-	f_flag += fread(r->name, sizeof(char), r->total_name_length, fp);
+	CKPT_R_FP(r->name, sizeof(char)*(size_t)r->total_name_length, crc);
 
 	r->name_index = (uint64_t*)malloc(sizeof(uint64_t)*r->name_index_size);
-	f_flag += fread(r->name_index, sizeof(uint64_t), r->name_index_size, fp);
+	CKPT_R_FP(r->name_index, sizeof(uint64_t)*(size_t)r->name_index_size, crc);
 
 	/****************************may have bugs********************************/
 	r->trio_flag = (uint8_t*)malloc(sizeof(uint8_t)*r->total_reads);
-	f_flag += fread(r->trio_flag, sizeof(uint8_t), r->total_reads, fp);
-	f_flag += fread(&(asm_opt.hom_cov), sizeof(asm_opt.hom_cov), 1, fp);
-    f_flag += fread(&(asm_opt.het_cov), sizeof(asm_opt.het_cov), 1, fp);
+	CKPT_R_FP(r->trio_flag, sizeof(uint8_t)*(size_t)r->total_reads, crc);
+	CKPT_R_FP(&(asm_opt.hom_cov), sizeof(asm_opt.hom_cov), crc);
+    CKPT_R_FP(&(asm_opt.het_cov), sizeof(asm_opt.het_cov), crc);
 	/****************************may have bugs********************************/
 
 	r->cigars = (Compressed_Cigar_record*)malloc(sizeof(Compressed_Cigar_record)*r->total_reads);
@@ -212,23 +224,31 @@ int load_All_reads(All_reads* r, char* read_file_name)
 	///r->pb_regions = NULL;
 
 	uint64_t mm = 0;
-	if (!feof(fp)) {
+	if (asm_opt.is_sc) {
 		if((fread(&mm, sizeof(mm), 1, fp)) && (mm == 1)) {
+			if (crc) *crc = crc32(*crc, (const Bytef*)&mm, (uInt)sizeof(mm));
 			MALLOC(r->rsc, r->total_reads);
 			for (i = 0; i < r->total_reads; i++) {
 				MALLOC(r->rsc[i], (r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0));
-				f_flag += fread(r->rsc[i], sizeof(uint8_t), (r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0), fp);
+				CKPT_R_FP(r->rsc[i], sizeof(uint8_t)*(size_t)((r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0)), crc);
 			}
 		}
 	}
+	return 1;
+}
 
-
-
-    free(index_name);    
+int load_All_reads(All_reads* r, char* read_file_name)
+{
+    char* index_name = (char*)malloc(strlen(read_file_name)+15);
+    sprintf(index_name, "%s.bin", read_file_name);
+    FILE* fp = fopen(index_name, "r");
+    free(index_name);
+	if (!fp) return 0;
+	int ret = load_All_reads_fp(r, fp, NULL);
     fclose(fp);
     fprintf(stderr, "Reads has been loaded.\n");
 
-	return 1;
+	return ret;
 }
 
 void read_ma(ma_hit_t* x, FILE* fp)

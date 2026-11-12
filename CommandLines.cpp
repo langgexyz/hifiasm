@@ -81,6 +81,7 @@ static ko_longopt_t long_options[] = {
     { "ul-m",     ko_required_argument, 363},
     { "rl-cut",     ko_required_argument, 364},
     { "sc-cut",     ko_required_argument, 365},
+    { "ckpt-int",   ko_required_argument, 366},
     // { "path-round",     ko_required_argument, 348},
 	{ 0, 0, 0 }
 };
@@ -122,7 +123,8 @@ void Print_H(hifiasm_opt_t* asm_opt)
     fprintf(stderr, "    -n INT       remove tip unitigs composed of <=INT reads [%d]\n", asm_opt->max_short_tip);
     fprintf(stderr, "    -x FLOAT     max overlap drop ratio [%.2g]\n", asm_opt->max_drop_rate);
     fprintf(stderr, "    -y FLOAT     min overlap drop ratio [%.2g]\n", asm_opt->min_drop_rate);
-    fprintf(stderr, "    -i           ignore saved read correction and overlaps\n");
+    fprintf(stderr, "    -i           ignore saved read correction, overlaps and checkpoints\n");
+    fprintf(stderr, "    --ckpt-int   seconds between checkpoint fsyncs during correction/overlap [60]; 0 disables checkpoints\n");
     fprintf(stderr, "    -u           post-join step for contigs which may improve N50; 0 to disable; 1 to enable\n");
     fprintf(stderr, "                 [%u] and [%u] in default for the UL+HiFi assembly and the HiFi assembly, respectively\n",
                                       asm_opt->ul_pst_join, asm_opt->hifi_pst_join);
@@ -277,6 +279,7 @@ void init_opt(hifiasm_opt_t* asm_opt)
 	asm_opt->min_hist_kmer_cnt = 5;
     asm_opt->load_index_from_disk = 1;
     asm_opt->write_index_to_disk = 1;
+    asm_opt->ckpt_int = 60;
     asm_opt->number_of_round = 3;
     asm_opt->number_of_pround = 0/**3**/;
     asm_opt->adapterLen = 0;
@@ -1003,6 +1006,9 @@ int CommandLine_process(int argc, char *argv[], hifiasm_opt_t* asm_opt)
             asm_opt->rl_cut = atol(opt.arg);
         } else if (c == 365) {
             asm_opt->sc_cut = atol(opt.arg);
+        } else if (c == 366) {
+            asm_opt->ckpt_int = atol(opt.arg);
+            if (asm_opt->ckpt_int < 0) asm_opt->ckpt_int = 0;
         } else if (c == 'l') {   ///0: disable purge_dup; 1: purge containment; 2: purge overlap
             asm_opt->purge_level_primary = asm_opt->purge_level_trio = atoi(opt.arg);
         }

@@ -118,6 +118,7 @@ typedef struct {
     long long num_bases;
     long long num_corrected_bases;
     long long num_recorrected_bases;
+	long long ckpt_int;
 	long long mem_buf;
     long long coverage;
     int hap_occ;

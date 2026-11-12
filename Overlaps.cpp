@@ -23444,7 +23444,9 @@ void write_ma_hit_ts(ma_hit_t_alloc* x, long long n_read, char* read_file_name)
     fprintf(stderr, "Writing ma_hit_ts to disk... \n");
     char* index_name = (char*)malloc(strlen(read_file_name)+15);
     sprintf(index_name, "%s.bin", read_file_name);
-    FILE* fp = fopen(index_name, "w");
+    char* tmp_name = (char*)malloc(strlen(index_name)+8);
+    sprintf(tmp_name, "%s.tmp", index_name);
+    FILE* fp = fopen(tmp_name, "w");
     long long i, k;
     fwrite(&n_read, sizeof(n_read), 1, fp);
 
@@ -23463,8 +23465,11 @@ void write_ma_hit_ts(ma_hit_t_alloc* x, long long n_read, char* read_file_name)
 
 
     free(index_name);
-    fflush(fp);    
+    fflush(fp);
+	fsync(fileno(fp));
     fclose(fp);
+	if (rename(tmp_name, index_name) != 0) unlink(tmp_name);
+    free(tmp_name);
     fprintf(stderr, "ma_hit_ts has been written.\n");
 }
 

@@ -5,8 +5,11 @@
 #include <stdint.h>
 #include "Hash_Table.h"
 #include "Process_Read.h"
+#include "Levenshtein_distance.h"
 #include "kdq.h"
 
+typedef struct {size_t n, m; asg16_v *a; uint8_t *f; } cc_v;
+extern cc_v scc, scb, sca;
 
 void prt_chain(overlap_region_alloc *o);
 void cal_ec_r(uint64_t n_thre, uint64_t round, uint64_t n_round, uint64_t n_a, uint64_t is_sv, uint64_t *tot_b, uint64_t *tot_e);

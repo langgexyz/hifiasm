@@ -235,7 +235,9 @@ void recover_UC_Read_sub_region(char* r, int64_t start_pos, int64_t length, uint
 void destory_UC_Read(UC_Read* r);
 void reverse_complement(char* pattern, uint64_t length);
 void write_All_reads(All_reads* r, char* read_file_name);
+void write_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc);
 int load_All_reads(All_reads* r, char* read_file_name);
+int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc);
 int append_All_reads(All_reads* r, char *idx, uint32_t id);
 void destory_All_reads(All_reads* r);
 int destory_read_bin(All_reads* r);

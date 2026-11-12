@@ -13,6 +13,7 @@
 #include "rcut.h"
 #include "kalloc.h"
 #include "ecovlp.h"
+#include "ckpt.h"
 
 void ha_get_candidates_interface(ha_abuf_t *ab, int64_t rid, UC_Read *ucr, overlap_region_alloc *overlap_list, overlap_region_alloc *overlap_list_hp, Candidates_list *cl, double bw_thres, 
 int max_n_chain, int keep_whole_chain, kvec_t_u8_warp* k_flag, kvec_t_u64_warp* chain_idx, ma_hit_t_alloc* paf, ma_hit_t_alloc* rev_paf, overlap_region* f_cigar, kvec_t_u64_warp* dbg_ct, st_mt_t *sp);
@@ -2074,8 +2075,10 @@ int ha_assemble(void)
         if (asm_opt.het_cov == -1024) hap_recalculate_peaks(asm_opt.output_file_name), ovlp_loaded = 2;
 	}
 	if (!ovlp_loaded) {
+		int64_t ckpt_round = -1;
         ha_flt_tab = ha_idx = NULL;
         if((asm_opt.flag & HA_F_VERBOSE_GFA)) load_pt_index(&ha_flt_tab, &ha_idx, &R_INF, &asm_opt, asm_opt.output_file_name), load_ct_index(&ha_ct_table, asm_opt.output_file_name);
+		if (!(asm_opt.flag & HA_F_VERBOSE_GFA)) ckpt_round = ha_ckpt_load_latest((void**)&ha_flt_tab);
 
 		// construct hash table for high occurrence k-mers
 		if (!(asm_opt.flag & HA_F_NO_KMER_FLT) && ha_flt_tab == NULL) 
@@ -2085,11 +2088,12 @@ int ha_assemble(void)
 		}
 		// error correction
 		assert(asm_opt.number_of_round > 0);
-		for (r = ha_idx?asm_opt.number_of_round-1:0; r < asm_opt.number_of_round; ++r) {
+		for (r = (ckpt_round >= 0)? ckpt_round + 1 : (ha_idx?asm_opt.number_of_round-1:0); r < asm_opt.number_of_round; ++r) {
 			ha_opt_reset_to_round(&asm_opt, r); // this update asm_opt.roundID and a few other fields
             tot_b = tot_e = 0;
 			// ha_overlap_and_correct(r);
             ha_ec(r, asm_opt.number_of_pround, (r<asm_opt.number_of_round-1)?1:0, &tot_b, &tot_e);
+			ha_ckpt_write_round(r, ha_flt_tab);
 			fprintf(stderr, "[M::%s::%.3f*%.2f@%.3fGB] ==> corrected reads for round %d\n", __func__, yak_realtime(),
 					yak_cpu_usage(), yak_peakrss_in_gb(), r + 1);
             fprintf(stderr, "[M::%s] # bases: %lu; # corrected bases: %lu\n", __func__, tot_b, tot_e);
@@ -2120,6 +2124,7 @@ int ha_assemble(void)
     build_string_graph_without_clean(asm_opt.min_overlap_coverage, R_INF.paf, R_INF.reverse_paf, 
         R_INF.total_reads, R_INF.read_length, asm_opt.min_overlap_Len, asm_opt.max_hang_Len, asm_opt.clean_round, 
         asm_opt.gap_fuzz, asm_opt.min_drop_rate, asm_opt.max_drop_rate, asm_opt.output_file_name, asm_opt.large_pop_bubble_size, 0, !ovlp_loaded);
+	ha_ckpt_purge();
 	destory_All_reads(&R_INF);
 	return 0;
 }
