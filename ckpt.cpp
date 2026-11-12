@@ -256,6 +256,11 @@ static int ckpt_write_one(const char *path, int64_t round, void *flt_tab)
 	u8 = (sca.a != NULL); CKPT_W(fp, &u8, 1, &crc);
 	if (u8) wr_cc(fp, &sca, R_INF.total_reads, &crc);
 
+	/* opt fields that workers read and that get mutated mid-run by
+	   ha_opt_update_cov (not part of params_hash: the snapped value is the
+	   already-bumped one, restoring it keeps resume identical) */
+	{ int64_t v = asm_opt.max_n_chain;    CKPT_W(fp, &v, sizeof(v), &crc); }
+
 	u64 = crc;   fwrite(&u64, sizeof(u64), 1, fp);
 	u64 = HA_CKPT_FIN_MAGIC; fwrite(&u64, sizeof(u64), 1, fp);
 
@@ -320,6 +325,9 @@ static int ckpt_read_one(const char *path, int64_t exp_round, void **flt_tab, Al
 		sca.n = sca.m = n_reads; CALLOC(sca.a, n_reads);
 		if (!rd_cc(fp, &sca, n_reads, &crc)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s sca fail\n", path); return 0; }
 	}
+
+	{ int64_t v;
+	  CKPT_RD(fp, &v, sizeof(v), &crc); asm_opt.max_n_chain = v; }
 
 	if (fread(&u64, sizeof(u64), 1, fp) != 1) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s crc missing\n", path); return 0; }
 	file_crc = (uint32_t)u64;
@@ -671,8 +679,14 @@ void ha_ckpt_purge(void)
 	for (r = -1; r < (int64_t)asm_opt.number_of_round + 1; ++r) {
 		if (r >= 0) {
 			n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.snap", r); unlink(n); free(n);
+			n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.snap.tmp", r); unlink(n); free(n);
 			n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.ecstr", r); unlink(n); free(n);
 		}
 	}
 	n = ckpt_name(asm_opt.output_file_name, "%s.ff.ovstr", -1); unlink(n); free(n);
+	/* stale .tmp litter from runs killed mid-atomic-write */
+	{	char b[4096];
+		snprintf(b, sizeof(b), "%s.ec.bin.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.ovlp.source.bin.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.ovlp.reverse.bin.tmp", asm_opt.output_file_name); unlink(b); }
 }

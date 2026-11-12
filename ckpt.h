@@ -26,7 +26,7 @@
 
 #define HA_CKPT_HDR_MAGIC   "HICKPT01"
 #define HA_CKPT_FIN_MAGIC   0x314E494650544b43ULL
-#define HA_CKPT_FMT_VER     1u
+#define HA_CKPT_FMT_VER     2u
 #define HA_CKPT_REC_MAGIC   0x5243u
 
 #define HA_CKPT_STAGE_EC    0u
