@@ -11,15 +11,17 @@ BASES = "ACGT"
 def rand_seq(n):
     return "".join(random.choice(BASES) for _ in range(n))
 
-# genome: 1.2Mb unique + two duplicated segments (forces non-trivial overlaps)
-G = 1_200_000
+# usage: gen_reads.py out.fa [genome_bases=1200000] [coverage=25]
+G   = int(sys.argv[2]) if len(sys.argv) > 2 else 1_200_000
+COV = int(sys.argv[3]) if len(sys.argv) > 3 else 25
 genome = rand_seq(G)
-dup1 = genome[100_000:130_000]
-dup2 = genome[500_000:560_000]
-genome = genome + dup1 + dup2          # ~1.29Mb total
+# two duplicated segments (forces non-trivial overlaps)
+dup1 = genome[G//12 : G//12 + G//40]
+dup2 = genome[G//2  : G//2  + G//25]
+genome = genome + dup1 + dup2
 
 out = open(sys.argv[1] if len(sys.argv) > 1 else "reads.fa", "w")
-COV, RL_MIN, RL_MAX, ERR = 25, 8000, 14000, 0.008
+RL_MIN, RL_MAX, ERR = 8000, 14000, 0.008
 n_bases = int(len(genome) * COV)
 rid, emitted = 0, 0
 while emitted < n_bases:
