@@ -1,3 +1,8 @@
 .*.swp
 *.o
 *.json
+hifiasm
+# test_ckpt/ 是断电续跑测试的 scratch 目录; 产物一律忽略, 只留脚本
+test_ckpt/*
+!test_ckpt/gen_reads.py
+!test_ckpt/kill_resume_test.sh
