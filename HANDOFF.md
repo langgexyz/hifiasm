@@ -136,7 +136,7 @@ cd test_ckpt && ./kill_resume_test.sh ../hifiasm <reads.fa> <outdir> 16 [ecstr�
 |---|---|---|
 | 中 | `ckpt_read_one` 失败路径泄漏/半成品状态（tmp 不释放、hom/het_cov 提前覆盖、max_n_chain 先写后验） | **已修**：全部加载入局部变量，CRC 全量验证后才提交全局；`free_partial_reads`/`free_cc_v`/`free_paf_arr` 清理；指针数组改 calloc 保证部分释放安全 |
 | 中 | fwrite/fflush/fsync 返回值不检查，磁盘满会把截断文件 rename 成正文件 | **已修**:`ckpt_rename_sync`/`write_All_reads`/`write_ma_hit_ts` 加 ferror+fflush+fsync+fclose 检查，失败不 rename、不打印成功 |
-| 中 | flt_tab 正文不在 CRC 内，中段位翻转静默出错 | **已修**:open_memstream 缓冲后长度前缀+整块 CRC,**FMT_VER 2→3**（旧快照自动拒绝） |
+| 中 | flt_tab 正文不在 CRC 内，中段位翻转静默出错 | **已修**:open_memstream 缓冲+段级 CRC+长度前缀；且整体改为**两遍读**(pass1 先验 footer+全体 CRC,pass2 才解析）——损坏文件到不了任何解析器，**FMT_VER 2→3**（旧快照自动拒绝） |
 | 低 | `(uInt)(n)` 截断，>4GB section CRC 只覆盖低 32 位 | **已修**:`ckpt_crc32` 分块 |
 | 低 | rd_cc/rd_paf_arr/stream plen 先按文件长度字段分配后校验 | **已修**：全部按 fstat 文件大小做 sanity bound |
 | 低 | `load_All_reads_fp` 指针数组 malloc 未初始化，部分加载无法安全释放 | **已修**:N_site/read_sperate/rsc 改 calloc;hom/het_cov 末尾才提交 |
