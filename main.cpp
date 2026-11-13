@@ -63,6 +63,7 @@ int main(int argc, char *argv[])
 	// exit(1);
 	if(asm_opt.sec_in) ret = ha_assemble_pair();
 	else if(asm_opt.dbg_ovec_cal) ret = ha_ec_dbg();
+	else if(getenv("HIFIASM_OVEC")) ret = ha_assemble_ovec();
 	else ret = ha_assemble();
 	
     destory_opt(&asm_opt);

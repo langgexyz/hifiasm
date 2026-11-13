@@ -3237,6 +3237,11 @@ static void worker_hap_ec(void *data, long i, int tid)
 {
 	ec_ovec_buf_t *dd = (ec_ovec_buf_t*)data;
 	if (dd->ck_done && dd->ck_done[i]) return;
+	{ /**experimental read-sharding: HIFIASM_SHARD=k/N processes only rid%N==k**/
+		static int sk = -2, sn = 1;
+		if (sk == -2) { const char *e = getenv("HIFIASM_SHARD"); sk = e && sscanf(e, "%d/%d", &sk, &sn) ? sk : -1; }
+		if (sk >= 0 && (int)(i % sn) != sk) return;
+	}
 	ec_ovec_buf_t0 *b = &(((ec_ovec_buf_t*)data)->a[tid]);
     uint32_t high_occ = asm_opt.hom_cov * (2.0 - HA_KMER_GOOD_RATIO);
     uint32_t low_occ = asm_opt.hom_cov * HA_KMER_GOOD_RATIO;
@@ -6087,6 +6092,7 @@ uint64_t cal_ec_multiple(ec_ovec_buf_t *b, uint64_t n_thre, uint64_t n_a, uint64
     b->ck_done = b->ck ? b->ck->done : NULL;
     kt_for(n_thre, worker_hap_ec, b, n_a);///debug_for_fix
     ha_ckpt_stream_close(b->ck); b->ck = NULL; b->ck_done = NULL;
+    if (getenv("HIFIASM_PAF_DUMP")) { extern void Output_PAF0(ma_hit_t_alloc*, const char*); Output_PAF0(R_INF.paf, "w"); }
 
     for (k = 0; k < n_thre; ++k) {
         num_base += b->a[k].cnt[0];
