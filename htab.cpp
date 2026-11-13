@@ -670,30 +670,7 @@ int sf##_ha_pt_insert_list(ha_pt_t *h, int n, const HType *a)\
 	return n_ins;\
 }\
 /** data structure for each step in kt_pipeline()**/\
-typedef struct {pl_data_t *p;uint64_t n_seq0; int n_seq, m_seq, sum_len, nk, uq, *len; char **seq; VType *mz_buf; VType *mz;sf##_ch_buf_t *buf;st_mt_t *mt;} sf##_st_data_t;\
-static void sf##_worker_for_insert(void *data, long i, int tid) /** callback for kt_for()**/\
-{\
-	sf##_st_data_t *s = (sf##_st_data_t*)data;\
-	sf##_ch_buf_t *b = &s->buf[i];\
-	if (s->p->pt){\
-		if(s->p->flag&HAF_COUNT_REFINE) b->n_ins += ha_pt_cnt_insert_list(s->p->pt, b->n, b->a);\
-		else b->n_ins += sf##_ha_pt_insert_list(s->p->pt, b->n, b->b);\
-	}else{\
-		b->n_ins += ha_ct_insert_list(s->p->ct, s->p->create_new, b->n, b->a);\
-	}\
-}\
-static void sf##_worker_for_mz(void *data, long i, int tid)\
-{\
-	sf##_st_data_t *s = (sf##_st_data_t*)data;\
-	/**get the corresponding minimzer vector of this read**/\
-	VType *b = &s->mz_buf[tid];\
-	s->mz_buf[tid].n = 0;\
-	sf##_ha_sketch(s->seq[i], s->len[i], s->p->opt->w, s->p->opt->k, s->n_seq0 + i, s->p->opt->is_HPC, b, s->p->flt_tab, asm_opt.mz_sample_dist, 0, 0, \
-	(s->p->pt&&(s->p->flag&HAF_COUNT_REFINE))?s->p->pt:NULL, s->p->opt->min_rcnt, asm_opt.dp_min_len, asm_opt.dp_e, &(s->mt[tid]), asm_opt.mz_rewin, s->uq, NULL);\
-	s->mz[i].n = s->mz[i].m = b->n;\
-	MALLOC(s->mz[i].a, b->n);\
-	MEMCPY(s->mz[i].a, b->a, b->n);\
-}\
+typedef struct {pl_data_t *p;uint64_t n_seq0; int n_seq, m_seq, sum_len, nk, uq, nrow, *len; char **seq; char **name; uint64_t *rid; VType *mz_buf; VType *mz;sf##_ch_buf_t *buf;st_mt_t *mt;UC_Read *ucr;} sf##_st_data_t;\
 static inline void sf##_pt_insert_buf(sf##_ch_buf_t *buf, int p, const HType *y){\
 	/**assign minimizer to one of 4096 bins by low 12 bits**/\
 	int pre = y->x & ((1<<p) - 1);\
@@ -703,6 +680,58 @@ static inline void sf##_pt_insert_buf(sf##_ch_buf_t *buf, int p, const HType *y)
 		REALLOC(b->b, b->m);\
 	}\
 	b->b[b->n++] = *y;\
+}\
+static void sf##_worker_for_insert(void *data, long i, int tid) /** callback for kt_for()**/\
+{\
+	sf##_st_data_t *s = (sf##_st_data_t*)data;\
+	/**$s->nrow private rows per producer; merge rows of bucket $i**/\
+	int t, n_pre = 1 << s->p->opt->pre;\
+	for (t = 0; t < s->nrow; ++t) {\
+		sf##_ch_buf_t *b = &s->buf[(size_t)t*n_pre + i];\
+		if (s->p->pt){\
+			if(s->p->flag&HAF_COUNT_REFINE) b->n_ins += ha_pt_cnt_insert_list(s->p->pt, b->n, b->a);\
+			else b->n_ins += sf##_ha_pt_insert_list(s->p->pt, b->n, b->b);\
+		}else{\
+			b->n_ins += ha_ct_insert_list(s->p->ct, s->p->create_new, b->n, b->a);\
+		}\
+	}\
+}\
+static void sf##_worker_for_mz(void *data, long i, int tid)\
+{\
+	sf##_st_data_t *s = (sf##_st_data_t*)data;\
+	/**get the corresponding minimzer vector of this read**/\
+	VType *b = &s->mz_buf[tid];\
+	const char *seq; int len;\
+	uint64_t rid = s->n_seq0 + i;\
+	b->n = 0;\
+	if (s->rid) { /**deferred ingest: materialize compressed read in parallel**/\
+		rid = s->rid[i];\
+		recover_UC_Read(&s->ucr[tid], s->p->rs_in, rid);\
+		seq = s->ucr[tid].seq; len = (int)s->ucr[tid].length;\
+	} else { seq = s->seq[i]; len = s->len[i]; }\
+	if (s->name) { /**deferred WRITE_SEQ: compress + name + N_site now, in parallel**/\
+		int k_, n_N;\
+		for (k_ = n_N = 0; k_ < len; ++k_)\
+			if (seq_nt4_table[(uint8_t)seq[k_]] >= 4) ++n_N;\
+		ha_compress_base(Get_READ(*s->p->rs_out, rid), (char*)seq, len, &s->p->rs_out->N_site[rid], n_N);\
+		memcpy(&s->p->rs_out->name[s->p->rs_out->name_index[rid]], s->name[i], strlen(s->name[i]));\
+		free(s->name[i]); s->name[i] = 0;\
+	}\
+	sf##_ha_sketch(seq, len, s->p->opt->w, s->p->opt->k, rid, s->p->opt->is_HPC, b, s->p->flt_tab, asm_opt.mz_sample_dist, 0, 0, \
+	(s->p->pt&&(s->p->flag&HAF_COUNT_REFINE))?s->p->pt:NULL, s->p->opt->min_rcnt, asm_opt.dp_min_len, asm_opt.dp_e, &(s->mt[tid]), asm_opt.mz_rewin, s->uq, NULL);\
+	s->mz[i].n = s->mz[i].m = b->n;\
+	MALLOC(s->mz[i].a, b->n);\
+	MEMCPY(s->mz[i].a, b->a, b->n);\
+}\
+static void sf##_worker_cnt_seq(void *data, long i, int tid) /** w==1: enumerate all k-mers in parallel**/\
+{\
+	sf##_st_data_t *s = (sf##_st_data_t*)data;\
+	sf##_ch_buf_t *row = s->buf + (size_t)tid * (1 << s->p->opt->pre);\
+	if (s->p->opt->is_HPC)\
+		sf##_count_seq_buf_HPC(row, s->p->opt->k, s->p->opt->pre, s->len[i], s->seq[i]);\
+	else\
+		sf##_count_seq_buf(row, s->p->opt->k, s->p->opt->pre, s->len[i], s->seq[i]);\
+	if (!s->p->is_store) free(s->seq[i]), s->seq[i] = 0;\
 }\
 static void *sf##_worker_count(void *data, int step, void *in) /** callback for kt_pipeline()**/\
 {\
@@ -716,21 +745,30 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 		s->n_seq0 = p->n_seq;\
 		s->uq = p->opt->uq;\
 		if (p->rs_in && (p->flag & HAF_RS_READ)) {\
+			/**minimizer path: defer decompress to step-1 workers (per-read, embarrassingly parallel)**/\
+			int defer = (p->opt->w > 1);\
 			while (p->n_seq < p->rs_in->total_reads) {\
 				if ((p->flag & HAF_SKIP_READ) && p->rs_in->trio_flag[p->n_seq] != AMBIGU) {\
 					++p->n_seq;\
 					continue;\
 				}\
 				int l;\
-				recover_UC_Read(&p->ucr, p->rs_in, p->n_seq);\
-				l = p->ucr.length;\
 				if (s->n_seq == s->m_seq) {\
 					s->m_seq = s->m_seq < 16? 16 : s->m_seq + (s->m_seq>>1);\
 					REALLOC(s->len, s->m_seq);\
 					REALLOC(s->seq, s->m_seq);\
+					if (defer) REALLOC(s->rid, s->m_seq);\
 				}\
-				MALLOC(s->seq[s->n_seq], l);\
-				memcpy(s->seq[s->n_seq], p->ucr.seq, l);\
+				if (defer) {\
+					l = (int)p->rs_in->read_length[p->n_seq];\
+					s->rid[s->n_seq] = p->n_seq;\
+					s->seq[s->n_seq] = 0;\
+				} else {\
+					recover_UC_Read(&p->ucr, p->rs_in, p->n_seq);\
+					l = p->ucr.length;\
+					MALLOC(s->seq[s->n_seq], l);\
+					memcpy(s->seq[s->n_seq], p->ucr.seq, l);\
+				}\
 				s->len[s->n_seq++] = l;\
 				++p->n_seq;\
 				s->sum_len += l;\
@@ -772,13 +810,8 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 						assert(p->n_seq == p->rs_out->total_reads);\
 						ha_insert_read_len(p->rs_out, l, p->ks->name.l);\
 					} else if (p->flag & HAF_RS_WRITE_SEQ) {\
-						int i, n_N;\
 						assert(l == (int)p->rs_out->read_length[p->n_seq]);\
-						for (i = n_N = 0; i < l; ++i) /** count number of ambiguous bases**/\
-							if (seq_nt4_table[(uint8_t)p->ks->seq.s[i+p->opt->adaLen]] >= 4)\
-								++n_N;\
-						ha_compress_base(Get_READ(*p->rs_out, p->n_seq), p->ks->seq.s+p->opt->adaLen, l, &p->rs_out->N_site[p->n_seq], n_N);\
-						memcpy(&p->rs_out->name[p->rs_out->name_index[p->n_seq]], p->ks->name.s, p->ks->name.l);\
+						/**compress + name + N_site deferred to step-1 workers; rsc stays serial**/\
 						if(p->rs_out->rsc) {\
 							ha_compress_qual(Get_QUAL(*p->rs_out, p->n_seq), p->ks->qual.s+p->opt->adaLen, l, sc_bn, 33);\
 							/**print_fastq(NULL, p->ks->name.s, p->ks->seq.s, p->ks->qual.s, (1<<sc_bn), 33);**/\
@@ -795,6 +828,12 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 					s->m_seq = s->m_seq < 16? 16 : s->m_seq + (s->m_seq>>1);\
 					REALLOC(s->len, s->m_seq);\
 					REALLOC(s->seq, s->m_seq);\
+					if (p->rs_out && (p->flag & HAF_RS_WRITE_SEQ)) REALLOC(s->name, s->m_seq);\
+				}\
+				if (s->name) {\
+					MALLOC(s->name[s->n_seq], p->ks->name.l + 1);\
+					memcpy(s->name[s->n_seq], p->ks->name.s, p->ks->name.l);\
+					s->name[s->n_seq][p->ks->name.l] = 0;\
 				}\
 				MALLOC(s->seq[s->n_seq], l);\
 				memcpy(s->seq[s->n_seq], p->ks->seq.s+p->opt->adaLen, l);\
@@ -812,35 +851,33 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 	} else if (step == 1) { /** step 2: extract k-mers**/\
 		/**s is the block of reads**/\
 		sf##_st_data_t *s = (sf##_st_data_t*)in;\
-		int i, n_pre = 1<<p->opt->pre, m;\
-		/**allocate the k-mer buffer**/\
-		CALLOC(s->buf, n_pre);\
-		m = (int)(s->nk * 1.2 / n_pre) + 1;\
-		/**pre-allocate memory for each of 4096 buffer**/\
-		for (i = 0; i < n_pre; ++i) {\
+		int i, n_pre = 1<<p->opt->pre, m, nt = p->opt->n_thread;\
+		/**w==1 enumerates in parallel into per-worker bucket rows; w>1 keeps the
+		   single shared buffer (per-minimizer scattered writes into private rows
+		   measured slower than this serial redistribute)**/\
+		s->nrow = (p->opt->w == 1)? nt : 1;\
+		CALLOC(s->buf, (size_t)n_pre * s->nrow);\
+		m = (int)(s->nk * 1.2 / n_pre / s->nrow) + 64;\
+		/**pre-allocate memory for each bucket**/\
+		for (i = 0; i < n_pre * s->nrow; ++i) {\
 			s->buf[i].m = m;\
 			/**for 0-th counting, p->pt = NULL**/\
 			if (p->pt && !(p->flag&HAF_COUNT_REFINE)) MALLOC(s->buf[i].b, m);\
 			else MALLOC(s->buf[i].a, m);\
 		}\
-		if (p->opt->w == 1) { /** enumerate all k-mers**/\
-			int i;\
-			for (i = 0; i < s->n_seq; ++i) {\
-				if (p->opt->is_HPC)\
-					sf##_count_seq_buf_HPC(s->buf, p->opt->k, p->opt->pre, s->len[i], s->seq[i]);\
-				else\
-					sf##_count_seq_buf(s->buf, p->opt->k, p->opt->pre, s->len[i], s->seq[i]);\
-				if (!p->is_store) free(s->seq[i]);\
-			}\
+		if (p->opt->w == 1) { /** enumerate all k-mers, in parallel**/\
+			kt_for(nt, sf##_worker_cnt_seq, s, s->n_seq);\
 		} else { /** minimizers only**/\
 			uint32_t j;\
 			/**s->n_seq is how many reads at this buffer**/\
 			/**s->mz && s->mz_buf are lists of minimzer vectors**/\
-			CALLOC(s->mz, s->n_seq), CALLOC(s->mz_buf, p->opt->n_thread), CALLOC(s->mt, p->opt->n_thread);\
-			/**calculate minimzers for each read, each read corresponds to one thread**/\
-			kt_for(p->opt->n_thread, sf##_worker_for_mz, s, s->n_seq);\
-			for (i = 0; i < p->opt->n_thread; ++i) free(s->mt[i].a), free(s->mz_buf[i].a);\
+			CALLOC(s->mz, s->n_seq), CALLOC(s->mz_buf, nt), CALLOC(s->mt, nt);\
+			if (s->rid) { CALLOC(s->ucr, nt); for (i = 0; i < nt; ++i) init_UC_Read(&s->ucr[i]); }\
+			/**calculate minimzers (and deferred ingest) for each read, in parallel**/\
+			kt_for(nt, sf##_worker_for_mz, s, s->n_seq);\
+			for (i = 0; i < nt; ++i) free(s->mt[i].a), free(s->mz_buf[i].a);\
 			free(s->mt), free(s->mz_buf);\
+			if (s->ucr) { for (i = 0; i < nt; ++i) destory_UC_Read(&s->ucr[i]); free(s->ucr); s->ucr = 0; }\
 			/**insert minimizers**/\
 			if (p->pt && !(p->flag&HAF_COUNT_REFINE)) {/**insert whole minimizer**/\
 				for (i = 0; i < s->n_seq; ++i)\
@@ -854,13 +891,13 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 			for (i = 0; i < s->n_seq; ++i) {\
 				p->n_mz += s->mz[i].n;\
 				free(s->mz[i].a);\
-				if (!p->is_store) free(s->seq[i]);\
+				if (!p->is_store) { free(s->seq[i]); s->seq[i] = 0; }\
 			}\
 			free(s->mz);\
 		}\
 		/**just clean seq**/\
-		free(s->seq); free(s->len);\
-		s->seq = 0, s->len = 0;\
+		free(s->seq); free(s->len); free(s->rid); free(s->name);\
+		s->seq = 0, s->len = 0, s->rid = 0, s->name = 0;\
 		return s;\
 	} else if (step == 2) { /** step 3: insert k-mers to hash table**/\
 		sf##_st_data_t *s = (sf##_st_data_t*)in;\
@@ -868,7 +905,7 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 		/**for 0-th counting, p->pt = NULL**/\
 		kt_for(p->opt->n_thread, sf##_worker_for_insert, s, n);\
 		/**n_ins is number of distinct k-mers**/\
-		for (i = 0; i < n; ++i) {\
+		for (i = 0; i < n * s->nrow; ++i) {\
 			n_ins += s->buf[i].n_ins;\
 			if (p->pt && !(p->flag&HAF_COUNT_REFINE)) free(s->buf[i].b);\
 			else free(s->buf[i].a);\
