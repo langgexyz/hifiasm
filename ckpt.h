@@ -48,8 +48,6 @@ typedef struct {
 	double last_fsync;
 	int32_t fsync_sec;
 	pthread_mutex_t mut;
-	uint8_t *wbuf;
-	uint64_t wbuf_cap;
 	long resume_off;   /* end offset of valid records after rescan */
 } ha_ckpt_stream_t;
 

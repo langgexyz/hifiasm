@@ -227,27 +227,40 @@ static int rd_cc(FILE *fp, cc_v *cc, uint64_t n, uint32_t *crc)
 	return 1;
 }
 
-static int ckpt_write_one(const char *path, int64_t round, void *flt_tab)
+static long sec_mrk(FILE *fp, long *prev)
+{
+	long now = ftell(fp), sz = now - *prev;
+	*prev = now;
+	return sz;
+}
+
+static int ckpt_write_one(const char *path, int64_t round, void *flt_tab,
+		long *sz_flt, long *sz_reads, long *sz_paf, long *sz_tr)
 {
 	char *tmp = NULL;
 	FILE *fp = ckpt_fopen_atomic(path, &tmp);
 	uint32_t crc = 0;
 	uint64_t u64;
 	uint8_t u8;
+	long prev;
 	if (!fp) { free(tmp); return 0; }
 
 	wr_hdr(fp, HA_CKPT_STAGE_SNAP, round, R_INF.total_reads);
+	prev = ftell(fp);
 
 	u8 = (flt_tab != NULL); CKPT_W(fp, &u8, 1, &crc);
 	if (u8) { if (!ckpt_ft_save(flt_tab, fp)) { fclose(fp); unlink(tmp); free(tmp); return 0; } }
 	/* flt_tab body is opaque; fold it into crc by hashing file bytes later is
 	   not trivial -- crc covers the sections we serialize ourselves, the
 	   FIN_MAGIC footer still guarantees the file is complete */
+	if (sz_flt) *sz_flt = sec_mrk(fp, &prev);
 
 	write_All_reads_fp(&R_INF, fp, &crc);
+	if (sz_reads) *sz_reads = sec_mrk(fp, &prev);
 
 	wr_paf_arr(fp, R_INF.paf, R_INF.total_reads, &crc);
 	wr_paf_arr(fp, R_INF.reverse_paf, R_INF.total_reads, &crc);
+	if (sz_paf) *sz_paf = sec_mrk(fp, &prev);
 
 	u8 = (scc.a != NULL); CKPT_W(fp, &u8, 1, &crc);
 	if (u8) wr_cc(fp, &scc, R_INF.total_reads, &crc);
@@ -255,6 +268,7 @@ static int ckpt_write_one(const char *path, int64_t round, void *flt_tab)
 	if (u8) wr_cc(fp, &scb, R_INF.total_reads, &crc);
 	u8 = (sca.a != NULL); CKPT_W(fp, &u8, 1, &crc);
 	if (u8) wr_cc(fp, &sca, R_INF.total_reads, &crc);
+	if (sz_tr) *sz_tr = sec_mrk(fp, &prev);
 
 	/* opt fields that workers read and that get mutated mid-run by
 	   ha_opt_update_cov (not part of params_hash: the snapped value is the
@@ -271,11 +285,14 @@ int ha_ckpt_write_round(int64_t round, void *flt_tab)
 {
 	char *path, *old;
 	int ok;
+	long sf = -1, sr = -1, sp = -1, st = -1;
 	if (!ha_ckpt_on()) return 0;
 	path = ckpt_name(asm_opt.output_file_name, "%s.r%lld.snap", round);
-	ok = ckpt_write_one(path, round, flt_tab);
-	fprintf(stderr, "[M::%s::%.3f] %s checkpoint for round %lld\n", __func__,
-		yak_realtime(), ok?"==> wrote":"!! failed to write", (long long)round);
+	ok = ckpt_write_one(path, round, flt_tab, &sf, &sr, &sp, &st);
+	fprintf(stderr, "[M::%s::%.3f] %s checkpoint for round %lld"
+		" (flt=%.1fMB reads=%.1fMB paf=%.1fMB tr=%.1fMB)\n", __func__,
+		yak_realtime(), ok?"==> wrote":"!! failed to write", (long long)round,
+		sf/1048576.0, sr/1048576.0, sp/1048576.0, st/1048576.0);
 	if (ok) {
 		old = ckpt_name(asm_opt.output_file_name, "%s.r%lld.ecstr", round);
 		unlink(old); free(old); /* committed round: stream no longer needed */
@@ -667,7 +684,6 @@ void ha_ckpt_stream_close(ha_ckpt_stream_t *s)
 	fclose(s->fp);
 	pthread_mutex_destroy(&s->mut);
 	free(s->done);
-	free(s->wbuf);
 	free(s->path);
 	free(s);
 }
