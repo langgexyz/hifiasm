@@ -395,23 +395,49 @@ static int ckpt_read_one(const char *path, int64_t exp_round, void **flt_tab, Al
 	crc = ckpt_crc32(crc, (const Bytef*)(p), (n)); \
 } while (0)
 
+	/* pass 1: verify the whole body before ANY parsing. Read the footer
+	   first, then crc everything between hdr and footer. Corrupt or
+	   truncated files are rejected before a single field is trusted. */
+	{	long fpos = ftell(fp);
+		if (fsz < 16 || fseek(fp, (long)fsz - 16, SEEK_SET) != 0) goto fail;
+		if (fread(&u64, sizeof(u64), 1, fp) != 1) goto fail;
+		file_crc = (uint32_t)u64;
+		if (fread(&u64, sizeof(u64), 1, fp) != 1 || u64 != HA_CKPT_FIN_MAGIC)
+			{ fprintf(stderr, "[ckpt-dbg] %s fin fail\n", path); goto fail; }
+		if (fseek(fp, fpos, SEEK_SET) != 0) goto fail;
+		{	uint8_t buf[1<<20];
+			uint64_t left = fsz - 16 - (uint64_t)fpos;
+			while (left) {
+				size_t c = left > sizeof(buf) ? sizeof(buf) : (size_t)left;
+				if (fread(buf, 1, c, fp) != c) goto fail;
+				crc = ckpt_crc32(crc, buf, c);
+				left -= c;
+			}
+		}
+		if (file_crc != crc) { fprintf(stderr, "[ckpt-dbg] %s crc mismatch %x vs %x\n", path, file_crc, crc); goto fail; }
+		if (fseek(fp, fpos, SEEK_SET) != 0) goto fail;
+	}
+	crc = 0;   /* pass 2 re-accumulates to keep readers side-effect-free */
+
 	CKPT_RD_GF(&u8, 1);
 	if (u8) {
-		uint64_t mn; uint8_t *mb; FILE *mf; int ok; uint32_t scrc;
+		uint64_t mn; uint8_t *mb = NULL; FILE *mf; int ok; uint32_t scrc;
 		CKPT_RD_GF(&mn, sizeof(mn));
 		CKPT_RD_GF(&scrc, sizeof(scrc));
 		if (mn > fsz) goto fail;
-		mb = (uint8_t*)malloc(mn ? mn : 1);
-		if (!mb) goto fail;
-		if (fread(mb, 1, mn, fp) != mn) { free(mb); goto fail; }
-		crc = ckpt_crc32(crc, mb, mn);
-		/* verify the section before parsing it */
-		if (ckpt_crc32(0, mb, mn) != scrc) { free(mb); fprintf(stderr, "[ckpt-dbg] %s ft crc\n", path); goto fail; }
-		mf = fmemopen(mb, mn, "r");
-		ok = mf && ckpt_ft_load(&lft, mf);
-		if (mf) fclose(mf);
-		free(mb);
-		if (!ok) { fprintf(stderr, "[ckpt-dbg] %s ft fail\n", path); goto fail; }
+		if (mn) {
+			mb = (uint8_t*)malloc(mn);
+			if (!mb) goto fail;
+			if (fread(mb, 1, mn, fp) != mn) { free(mb); goto fail; }
+			crc = ckpt_crc32(crc, mb, mn);
+			/* verify the section before parsing it */
+			if (ckpt_crc32(0, mb, mn) != scrc) { free(mb); fprintf(stderr, "[ckpt-dbg] %s ft crc\n", path); goto fail; }
+			mf = fmemopen(mb, mn, "r");
+			ok = mf && ckpt_ft_load(&lft, mf);
+			if (mf) fclose(mf);
+			free(mb);
+			if (!ok) { fprintf(stderr, "[ckpt-dbg] %s ft fail\n", path); goto fail; }
+		}
 	}
 
 	if (!load_All_reads_fp(tmp, fp, &crc)) { fprintf(stderr, "[ckpt-dbg] %s reads fail\n", path); goto fail; }
