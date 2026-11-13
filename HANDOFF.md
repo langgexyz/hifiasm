@@ -150,3 +150,23 @@ cd test_ckpt && ./kill_resume_test.sh ../hifiasm <reads.fa> <outdir> 16 [ecstr�
 | — | params_hash 字段运行中是否被改 | max_n_chain 单独快照处理；flag 的 HA_F_PARTITION 变更在建图阶段（ckpt 写入之后），无影响 |
 
 验收：harness 重跑通过（SIGKILL→resume→4×GFA bit-exact,WAL 回放 323/2924)。
+
+## 进度/ETA 报告（新增，progress.h/.cpp）
+
+动机：长跑任务（GB 级数据可能数天）需要可观测的进度与预计完成时间。
+
+### 用法
+无需参数，stderr 自动输出两类行：
+- `[M::stage::T] ==> <stage>`：阶段边界（reads+count / index+ec round k/n / index+final overlap / graph+output + 建图子步）
+- `[M::prog::T] <stage> done/total pct% | eta <stage剩余> | run ~W% eta <全局剩余>`：每 ~10% 打点一次
+
+### 实现
+- worker 内 `ha_prog_add(&ec_prog,1)`：`volatile` 计数 + `__sync_add_and_fetch`，每 10% 才进 mutex 打印 → 开销可忽略
+- 全局 ETA = 权重模型：`reads+count 12%` + 各纠错轮 `0.60*0.75^r/Σ` 几何衰减 + `final overlap 6%` + `graph 15%`（按 1Gb/-t16 实测标定；小数据集会偏——per-stage ETA 是按实测速率的精确值，全局 ETA 只是近似）
+- `ha_prog_skip(w)`：checkpoint resume 时把已完成轮次的权重补进 g_wdone，run% 从正确位置起步
+- `ha_prog_init(w=-1)` 复用已声明的阶段权重，避免双重记账；`init` 哨兵防未初始化误触；`close` 补打 100% 行并 destroy mutex
+
+### 验证（小数据集 -t8）
+- 正常跑：阶段/百分比/ETA 输出正常，结尾 `2924/2924 100% | done`
+- kill/resume：`resumed checkpoint of round 0` 后 run% 从 ~40% 起步（跳过的 reads+count+round1 权重正确计入），WAL replay 读数计入进度
+- GFA：4 个输出全部 bit-exact（正常跑与 kill/resume 均验证）

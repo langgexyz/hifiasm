@@ -11,6 +11,7 @@
 #include "Purge_Dups.h"
 #include "hic.h"
 #include "kthread.h"
+#include "progress.h"
 #include "tovlp.h"
 #include "Assembly.h"
 #include "rcut.h"
@@ -39359,6 +39360,7 @@ ma_sub_t **coverage_cut_ptr, uint8_t *cmk, int debug_g)
         goto debug_gfa;
     }
     ///just for debug
+    ha_prog_sub("graph: init+normalize");
     if(!cmk) renew_graph_init(sources, reverse_sources, sg, coverage_cut, ruIndex, n_read);
     // if(asm_opt.is_ont) handle_chemical_arc(asm_opt.thread_num, R_INF.total_reads);
     // if(asm_opt.is_ont) handle_chemical_r(asm_opt.thread_num, R_INF.total_reads);
@@ -39394,10 +39396,12 @@ ma_sub_t **coverage_cut_ptr, uint8_t *cmk, int debug_g)
     // prt_specific_overlap(sources, 22233, 22235, "0-b");
     // prt_specific_overlap(sources, 22235, 22233, "0-b");
     // prt_dbg_rid_ovlp(sources, 27087, NULL, "0-a");
+    ha_prog_sub("graph: clean weak edges");
     if(!(asm_opt.is_ont)) clean_weak_ma_hit_t(sources, reverse_sources, n_read, asm_opt.ar?UL_COV_THRES:(uint32_t)-1);
     // prt_dbg_rid_ovlp(sources, 27087, NULL, "0-b");
     // prt_specific_overlap(sources, 22233, 22235, "0-c");
     // prt_specific_overlap(sources, 22235, 22233, "0-c");
+    ha_prog_sub("graph: build initial graph");
     sg = gen_init_sg(min_dp, n_read, mini_overlap_length, max_hang_length, gap_fuzz, sources, readLen, ruIndex, 
     &b_mask_t, &coverage_cut, asm_opt.ar?&UL_INF:NULL, te);
     // if(asm_opt.ar) exit(1);
@@ -39436,6 +39440,7 @@ ma_sub_t **coverage_cut_ptr, uint8_t *cmk, int debug_g)
     
     gen_ug_opt_t(&uopt, sources, reverse_sources, max_hang_length, mini_overlap_length, gap_fuzz, min_dp, readLen, coverage_cut, ruIndex, 
             (asm_opt.max_short_tip*2), 0.15, 3, 0.05, 0.9, &b_mask_t, te);
+    ha_prog_sub("graph: ul clean rounds");
     ul_clean_gfa(&uopt, sg, sources, reverse_sources, ruIndex, clean_round, min_ovlp_drop_ratio, max_ovlp_drop_ratio, 
     0.6, asm_opt.max_short_tip, gap_fuzz, &b_mask_t, !!asm_opt.ar, ha_opt_triobin(&asm_opt), UL_COV_THRES, cmk, o_file);
     ///@brief debug
@@ -39453,6 +39458,7 @@ ma_sub_t **coverage_cut_ptr, uint8_t *cmk, int debug_g)
         max_ovlp_drop_ratio, asm_opt.max_short_tip, gap_fuzz, min_dp, &b_mask_t, 
         ha_opt_triobin(&asm_opt), asm_opt.ul_clean_round, o_file, "re", te);
     } else {
+        ha_prog_sub("graph: ug extend+hic clean");
         ug_ext_gfa(&uopt, sg, ug_ext_len);
         if(!ha_opt_triobin(&asm_opt)) {
             // output_unitig_graph(sg, coverage_cut, "pre_clean", sources, ruIndex, max_hang_length, mini_overlap_length);
@@ -39596,11 +39602,13 @@ ma_sub_t **coverage_cut_ptr, uint8_t *cmk, int debug_g)
     ruIndex, 0.05, 0.9, max_hang_length, mini_overlap_length, 10, gap_fuzz, &b_mask_t);
     
 
+    ha_prog_sub("graph: write utg output");
     output_unitig_graph(sg, coverage_cut, o_file, sources, ruIndex, max_hang_length, mini_overlap_length);
     // flat_bubbles(sg, ruIndex->is_het); free(ruIndex->is_het); ruIndex->is_het = NULL;
     flat_soma_v(sg, sources, ruIndex);
     **/
 
+    ha_prog_sub("graph: write contig output");
     output_contig_graph_primary_pre(sg, coverage_cut, o_file, sources, reverse_sources, 
         asm_opt.small_pop_bubble_size, asm_opt.max_short_tip, ruIndex, max_hang_length, mini_overlap_length, &uopt);
     

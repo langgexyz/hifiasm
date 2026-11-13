@@ -7,6 +7,8 @@
 #include "kthread.h"
 #include "htab.h"
 #include "ckpt.h"
+#include "progress.h"
+static ha_prog_t ec_prog;
 #define HA_KMER_GOOD_RATIO 0.333
 #define E_KHIT 31
 #define CNS_DEL_E (0x7fffffffu)
@@ -3236,6 +3238,7 @@ uint32_t is_chemical_r_qual(overlap_region_alloc *ov, asg64_v *idx, int64_t len,
 static void worker_hap_ec(void *data, long i, int tid)
 {
 	ec_ovec_buf_t *dd = (ec_ovec_buf_t*)data;
+	ha_prog_add(&ec_prog, 1);
 	if (dd->ck_done && dd->ck_done[i]) return;
 	{ /**experimental read-sharding: HIFIASM_SHARD=k/N processes only rid%N==k**/
 		static int sk = -2, sn = 1;
@@ -3920,6 +3923,7 @@ static void worker_hap_post_rev(void *data, long i, int tid)
 
 static void worker_hap_dc_ec_gen(void *data, long i, int tid)
 {
+	ha_prog_add(&ec_prog, 1);
     
     ec_ovec_buf_t0 *b = &(((ec_ovec_buf_t*)data)->a[tid]);
     uint32_t high_occ = asm_opt.hom_cov * (2.0 - HA_KMER_GOOD_RATIO);
@@ -3957,6 +3961,7 @@ static void worker_hap_dc_ec_gen(void *data, long i, int tid)
 
 static void worker_hap_dc_ec_gen_new_idx(void *data, long i, int tid)
 {
+	ha_prog_add(&ec_prog, 1);
     
     ec_ovec_buf_t *dd = (ec_ovec_buf_t*)data;
 	if (dd->ck_done && dd->ck_done[i]) return;
@@ -6090,7 +6095,11 @@ uint64_t cal_ec_multiple(ec_ovec_buf_t *b, uint64_t n_thre, uint64_t n_a, uint64
 
     b->ck = ha_ckpt_stream_open(HA_CKPT_STAGE_EC, asm_opt.roundID, n_a);
     b->ck_done = b->ck ? b->ck->done : NULL;
+    { char nm[64]; snprintf(nm, sizeof(nm), "ec round %lld/%d",
+        (long long)asm_opt.roundID + 1, (int)asm_opt.number_of_round);
+      ha_prog_init(&ec_prog, nm, n_a, -1); }
     kt_for(n_thre, worker_hap_ec, b, n_a);///debug_for_fix
+    ha_prog_close(&ec_prog);
     ha_ckpt_stream_close(b->ck); b->ck = NULL; b->ck_done = NULL;
     if (getenv("HIFIASM_PAF_DUMP")) { extern void Output_PAF0(ma_hit_t_alloc*, const char*); Output_PAF0(R_INF.paf, "w"); }
 
@@ -6138,7 +6147,9 @@ void ha_print_ovlp_stat_1(ec_ovec_buf_t *b, uint64_t n_thre, uint64_t n_a)
         b->a[k].cnt[0] = b->a[k].cnt[1] = b->a[k].cnt[2] = b->a[k].cnt[3] = b->a[k].cnt[4] = b->a[k].cnt[5] = 0;
     }
 
+    ha_prog_init(&ec_prog, "final overlap", n_a, -1);
     kt_for(n_thre, worker_hap_dc_ec_gen, b, n_a);
+    ha_prog_close(&ec_prog);
 
     for (k = 0; k < n_thre; ++k) {
         forward += b->a[k].cnt[0];
@@ -6178,7 +6189,9 @@ void ha_print_ovlp_stat_0(ec_ovec_buf_t *b, uint64_t n_thre, uint64_t n_a)
 
     b->ck = ha_ckpt_stream_open(HA_CKPT_STAGE_OV, asm_opt.number_of_round, n_a);
     b->ck_done = b->ck ? b->ck->done : NULL;
+    ha_prog_init(&ec_prog, "final overlap", n_a, -1);
     kt_for(n_thre, worker_hap_dc_ec_gen_new_idx, b, n_a);
+    ha_prog_close(&ec_prog);
     ha_ckpt_stream_close(b->ck); b->ck = NULL; b->ck_done = NULL;
 
     for (k = 0; k < n_thre; ++k) {
