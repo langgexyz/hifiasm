@@ -235,7 +235,7 @@ static int rd_cc(FILE *fp, cc_v *cc, uint64_t n, uint32_t *crc, uint64_t fsz)
 		CKPT_RD(fp, &m, sizeof(m), crc);
 		CKPT_RD(fp, &f, sizeof(f), crc);
 		if (m > fsz/sizeof(uint16_t)) return 0;
-		if (m > cc->a[i].m) { REALLOC(cc->a[i].a, m); cc->a[i].m = m; }
+		if (m > cc->a[i].m) { REALLOC(cc->a[i].a, m); if (!cc->a[i].a) return 0; cc->a[i].m = m; }
 		cc->a[i].n = m;
 		if (m) CKPT_RD(fp, cc->a[i].a, sizeof(uint16_t)*m, crc);
 		if (cc->f) cc->f[i] = f;
@@ -266,13 +266,17 @@ static int ckpt_write_one(const char *path, int64_t round, void *flt_tab,
 
 	u8 = (flt_tab != NULL); CKPT_W(fp, &u8, 1, &crc);
 	if (u8) {
-		/* buffer the opaque flt_tab bytes so the section is CRC-covered */
+		/* buffer the opaque flt_tab bytes; carry a section crc so the
+		   reader verifies it BEFORE parsing (whole-file crc is only
+		   checked at the footer, too late) */
 		char *mb = NULL; size_t mn = 0;
 		FILE *mf = open_memstream(&mb, &mn);
 		int ok = mf && ckpt_ft_save(flt_tab, mf);
 		if (mf) fclose(mf);
 		if (!ok) { free(mb); fclose(fp); unlink(tmp); free(tmp); return 0; }
 		u64 = mn; CKPT_W(fp, &u64, sizeof(u64), &crc);
+		{ uint32_t scrc = ckpt_crc32(0, mb, mn);
+		  CKPT_W(fp, &scrc, sizeof(scrc), &crc); }
 		CKPT_W(fp, mb, mn, &crc);
 		free(mb);
 	}
@@ -333,13 +337,16 @@ int ha_ckpt_write_round(int64_t round, void *flt_tab)
 static void free_partial_reads(All_reads *r)
 {
 	uint64_t i;
-	for (i = 0; i < r->total_reads; ++i) {
-		if (r->N_site) free(r->N_site[i]);
-		if (r->read_sperate) free(r->read_sperate[i]);
-		if (r->cigars) { free(r->cigars[i].record); free(r->cigars[i].lost_base); }
-		if (r->second_round_cigar) { free(r->second_round_cigar[i].record); free(r->second_round_cigar[i].lost_base); }
-		if (r->rsc) free(r->rsc[i]);
-	}
+	/* total_reads may be a garbage value from a truncated header; only
+	   iterate when at least one per-read array was actually allocated */
+	if (r->N_site || r->read_sperate || r->cigars || r->second_round_cigar || r->rsc)
+		for (i = 0; i < r->total_reads; ++i) {
+			if (r->N_site) free(r->N_site[i]);
+			if (r->read_sperate) free(r->read_sperate[i]);
+			if (r->cigars) { free(r->cigars[i].record); free(r->cigars[i].lost_base); }
+			if (r->second_round_cigar) { free(r->second_round_cigar[i].record); free(r->second_round_cigar[i].lost_base); }
+			if (r->rsc) free(r->rsc[i]);
+		}
 	free(r->N_site); free(r->read_length); free(r->read_size);
 	free(r->read_sperate); free(r->name); free(r->name_index);
 	free(r->trio_flag); free(r->cigars); free(r->second_round_cigar); free(r->rsc);
@@ -390,13 +397,16 @@ static int ckpt_read_one(const char *path, int64_t exp_round, void **flt_tab, Al
 
 	CKPT_RD_GF(&u8, 1);
 	if (u8) {
-		uint64_t mn; uint8_t *mb; FILE *mf; int ok;
+		uint64_t mn; uint8_t *mb; FILE *mf; int ok; uint32_t scrc;
 		CKPT_RD_GF(&mn, sizeof(mn));
+		CKPT_RD_GF(&scrc, sizeof(scrc));
 		if (mn > fsz) goto fail;
 		mb = (uint8_t*)malloc(mn ? mn : 1);
 		if (!mb) goto fail;
 		if (fread(mb, 1, mn, fp) != mn) { free(mb); goto fail; }
 		crc = ckpt_crc32(crc, mb, mn);
+		/* verify the section before parsing it */
+		if (ckpt_crc32(0, mb, mn) != scrc) { free(mb); fprintf(stderr, "[ckpt-dbg] %s ft crc\n", path); goto fail; }
 		mf = fmemopen(mb, mn, "r");
 		ok = mf && ckpt_ft_load(&lft, mf);
 		if (mf) fclose(mf);
@@ -416,16 +426,19 @@ static int ckpt_read_one(const char *path, int64_t exp_round, void **flt_tab, Al
 	CKPT_RD_GF(&u8, 1);
 	if (u8) {
 		lscc.n = lscc.m = n_reads; CALLOC(lscc.a, n_reads); CALLOC(lscc.f, n_reads);
+		if (!lscc.a || !lscc.f) goto fail;
 		if (!rd_cc(fp, &lscc, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s scc fail\n", path); goto fail; }
 	}
 	CKPT_RD_GF(&u8, 1);
 	if (u8) {
 		lscb.n = lscb.m = n_reads; CALLOC(lscb.a, n_reads);
+		if (!lscb.a) goto fail;
 		if (!rd_cc(fp, &lscb, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s scb fail\n", path); goto fail; }
 	}
 	CKPT_RD_GF(&u8, 1);
 	if (u8) {
 		lsca.n = lsca.m = n_reads; CALLOC(lsca.a, n_reads);
+		if (!lsca.a) goto fail;
 		if (!rd_cc(fp, &lsca, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s sca fail\n", path); goto fail; }
 	}
 
@@ -477,6 +490,10 @@ int64_t ha_ckpt_load_latest(void **flt_tab)
 			if (R_INF.reverse_paf) {
 				for (i = 0; i < R_INF.total_reads; ++i) free(R_INF.reverse_paf[i].buffer);
 				free(R_INF.reverse_paf);
+			}
+			if (R_INF.rsc) {
+				for (i = 0; i < R_INF.total_reads; ++i) free(R_INF.rsc[i]);
+				free(R_INF.rsc);
 			}
 			memset(&R_INF, 0, sizeof(R_INF));
 			R_INF = tmp;   /* struct copy: takes over buffers */
@@ -601,6 +618,7 @@ static int ec_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 	pa->buffer = NULL;
 	if (n) {
 		pa->buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*n);
+		if (!pa->buffer) return 0;
 		memcpy(pa->buffer, p, sizeof(ma_hit_t)*n);
 	}
 	p += sizeof(ma_hit_t)*n;
@@ -614,6 +632,7 @@ static int ec_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 	pa->buffer = NULL;
 	if (n) {
 		pa->buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*n);
+		if (!pa->buffer) return 0;
 		memcpy(pa->buffer, p, sizeof(ma_hit_t)*n);
 	}
 	p += sizeof(ma_hit_t)*n;
@@ -634,7 +653,7 @@ static int ov_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 	if (pa->buffer) free(pa->buffer);
 	pa->length = pa->size = n;
 	pa->buffer = NULL;
-	if (n) { pa->buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*n); memcpy(pa->buffer, p, sizeof(ma_hit_t)*n); }
+	if (n) { pa->buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*n); if (!pa->buffer) return 0; memcpy(pa->buffer, p, sizeof(ma_hit_t)*n); }
 	p += sizeof(ma_hit_t)*n;
 
 	pa = &R_INF.reverse_paf[rid];
@@ -643,7 +662,7 @@ static int ov_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 	if (pa->buffer) free(pa->buffer);
 	pa->length = pa->size = n;
 	pa->buffer = NULL;
-	if (n) { pa->buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*n); memcpy(pa->buffer, p, sizeof(ma_hit_t)*n); }
+	if (n) { pa->buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*n); if (!pa->buffer) return 0; memcpy(pa->buffer, p, sizeof(ma_hit_t)*n); }
 	p += sizeof(ma_hit_t)*n;
 #undef NEED
 	return (p == e);

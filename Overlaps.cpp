@@ -23447,6 +23447,7 @@ void write_ma_hit_ts(ma_hit_t_alloc* x, long long n_read, char* read_file_name)
     char* tmp_name = (char*)malloc(strlen(index_name)+8);
     sprintf(tmp_name, "%s.tmp", index_name);
     FILE* fp = fopen(tmp_name, "w");
+    if (!fp) { free(index_name); free(tmp_name); fprintf(stderr, "ma_hit_ts write failed.\n"); return; }
     long long i, k;
     fwrite(&n_read, sizeof(n_read), 1, fp);
 

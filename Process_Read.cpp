@@ -136,6 +136,7 @@ void write_All_reads(All_reads* r, char* read_file_name)
 	char* tmp_name = (char*)malloc(strlen(index_name)+8);
     sprintf(tmp_name, "%s.tmp", index_name);
     FILE* fp = fopen(tmp_name, "w");
+	if (!fp) { free(index_name); free(tmp_name); fprintf(stderr, "Reads write failed.\n"); return; }
 	write_All_reads_fp(r, fp, NULL);
 	int bad = ferror(fp);
 	if (fflush(fp) != 0) bad = 1;
@@ -233,6 +234,7 @@ int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
 
 	r->cigars = (Compressed_Cigar_record*)malloc(sizeof(Compressed_Cigar_record)*r->total_reads);
 	r->second_round_cigar = (Compressed_Cigar_record*)malloc(sizeof(Compressed_Cigar_record)*r->total_reads);
+	if (!r->cigars || !r->second_round_cigar) return 0;
 	for (i = 0; i < r->total_reads; i++)
 	{
 		r->second_round_cigar[i].size = r->cigars[i].size = 0;
@@ -432,14 +434,22 @@ int destory_read_bin(All_reads* r)
 {
 
 	uint64_t i = 0;
+	/* only iterate when a per-read array exists; a garbage total_reads
+	   with all-NULL arrays would spin forever otherwise.
+	   rsc is owned by destory_All_reads -- do NOT free it here */
+	if (r->N_site || r->read_sperate || r->cigars || r->second_round_cigar)
 	for (i = 0; i < r->total_reads; i++)
 	{
-		if (r->N_site[i]) free(r->N_site[i]);
-		if (r->read_sperate[i]) free(r->read_sperate[i]);
-		if (r->cigars[i].record) free(r->cigars[i].record);
-		if (r->cigars[i].lost_base) free(r->cigars[i].lost_base);
-		if (r->second_round_cigar[i].record) free(r->second_round_cigar[i].record);
-		if (r->second_round_cigar[i].lost_base) free(r->second_round_cigar[i].lost_base);
+		if (r->N_site && r->N_site[i]) free(r->N_site[i]);
+		if (r->read_sperate && r->read_sperate[i]) free(r->read_sperate[i]);
+		if (r->cigars) {
+			if (r->cigars[i].record) free(r->cigars[i].record);
+			if (r->cigars[i].lost_base) free(r->cigars[i].lost_base);
+		}
+		if (r->second_round_cigar) {
+			if (r->second_round_cigar[i].record) free(r->second_round_cigar[i].record);
+			if (r->second_round_cigar[i].lost_base) free(r->second_round_cigar[i].lost_base);
+		}
 	}
 
 	free(r->N_site);
