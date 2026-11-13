@@ -587,6 +587,7 @@ typedef struct { // global data structure for kt_pipeline()
 	const All_reads *rs_in;
 	All_reads *rs_out;
 	const ma_utg_v *us_in;
+	double t_step0; ///diagnostic: accumulated time in step 0
 } pl_data_t;
 
 #define MZ_TEST_INIT(sf, HType, VType, IType, Ia) \
@@ -740,6 +741,7 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 	if (step == 0) { /** step 1: read a block of sequences**/\
 		int ret;\
 		sf##_st_data_t *s;\
+		double t0_ = yak_realtime_0();\
 		CALLOC(s, 1);\
 		s->p = p;\
 		s->n_seq0 = p->n_seq;\
@@ -846,6 +848,7 @@ static void *sf##_worker_count(void *data, int step, void *in) /** callback for 
 					break;\
 			}\
 		}\
+		p->t_step0 += yak_realtime_0() - t0_;\
 		if (s->sum_len == 0) free(s);\
 		else return s;\
 	} else if (step == 1) { /** step 2: extract k-mers**/\
@@ -1006,6 +1009,7 @@ static ha_ct_t *yak_count(const yak_copt_t *opt, const char *fn, int flag, ha_pt
 	if(pl.ct) pl.ct->bs = 0;
 	if(ug_rs) kt_pipeline(3, mz2_worker_count, &pl, 3);
 	else kt_pipeline(3, mz1_worker_count, &pl, 3);
+	fprintf(stderr, "[M::%s::%.3f] step0 read\n", __func__, pl.t_step0);
 	if (read_rs) {
 		destory_UC_Read(&pl.ucr);
 	} else if(!read_rs && !ug_rs) {
