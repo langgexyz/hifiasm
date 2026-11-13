@@ -3,6 +3,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <zlib.h>
 #include "Process_Read.h"
 #include "htab.h"
@@ -136,17 +137,19 @@ void write_All_reads(All_reads* r, char* read_file_name)
     sprintf(tmp_name, "%s.tmp", index_name);
     FILE* fp = fopen(tmp_name, "w");
 	write_All_reads_fp(r, fp, NULL);
-	fflush(fp);
-	fsync(fileno(fp));
-    fclose(fp);
-	if (rename(tmp_name, index_name) != 0) unlink(tmp_name);
+	int bad = ferror(fp);
+	if (fflush(fp) != 0) bad = 1;
+	if (fsync(fileno(fp)) != 0) bad = 1;
+    if (fclose(fp) != 0) bad = 1;
+	if (bad || rename(tmp_name, index_name) != 0) { unlink(tmp_name); fprintf(stderr, "Reads write failed.\n"); }
+	else fprintf(stderr, "Reads has been written.\n");
     free(index_name); free(tmp_name);
-    fprintf(stderr, "Reads has been written.\n");
 }
 
 int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
 {
 	int local_adapterLen;
+	int lhom = 0, lhet = 0;   /* committed to asm_opt only on full success */
     CKPT_R_FP(&local_adapterLen, sizeof(local_adapterLen), crc);
     if(local_adapterLen != asm_opt.adapterLen)
     {
@@ -160,16 +163,27 @@ int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
 	CKPT_R_FP(&r->total_reads_bases, sizeof(r->total_reads_bases), crc);
 	CKPT_R_FP(&r->total_name_length, sizeof(r->total_name_length), crc);
 
+	/* sanity-bound header counts by the file they must fit inside;
+	   each read costs >=16 bytes on disk, each index slot is 8 */
+	uint64_t fsz = 0;
+	{ struct stat st; if (fstat(fileno(fp), &st) == 0) fsz = (uint64_t)st.st_size; }
+	if (r->total_reads > fsz/16 || r->name_index_size > fsz/8 ||
+		r->index_size > fsz/8 || r->total_name_length > fsz) return 0;
+
 	uint64_t i = 0;
 	uint64_t zero = 0;
-	r->N_site = (uint64_t**)malloc(sizeof(uint64_t*)*r->total_reads);
+	/* calloc: unfilled slots stay NULL so a partial load can be freed safely */
+	r->N_site = (uint64_t**)calloc(r->total_reads, sizeof(uint64_t*));
+	if (!r->N_site) return 0;
 	for (i = 0; i < r->total_reads; i++)
 	{
 		CKPT_R_FP(&zero, sizeof(zero), crc);
 
 		if (zero)
 		{
+			if (zero > fsz/8) return 0;
 			r->N_site[i] = (uint64_t*)malloc(sizeof(uint64_t)*(zero + 1));
+			if (!r->N_site[i]) return 0;
 			r->N_site[i][0] = zero;
 			if (r->N_site[i][0])
 			{
@@ -183,30 +197,38 @@ int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
 	}
 
 	r->read_length = (uint64_t*)malloc(sizeof(uint64_t)*r->total_reads);
+	if (!r->read_length) return 0;
 	CKPT_R_FP(r->read_length, sizeof(uint64_t)*(size_t)r->total_reads, crc);
 
 	r->read_size = (uint64_t*)malloc(sizeof(uint64_t)*r->total_reads);
+	if (!r->read_size) return 0;
 	memcpy (r->read_size, r->read_length, sizeof(uint64_t)*r->total_reads);
 
-	r->read_sperate = (uint8_t**)malloc(sizeof(uint8_t*)*r->total_reads);
+	r->read_sperate = (uint8_t**)calloc(r->total_reads, sizeof(uint8_t*));
+	if (!r->read_sperate) return 0;
 	for (i = 0; i < r->total_reads; i++)
     {
+		if (r->read_length[i]/4+1 > fsz) return 0;
 		r->read_sperate[i] = (uint8_t*)malloc(sizeof(uint8_t)*(r->read_length[i]/4+1));
+		if (!r->read_sperate[i]) return 0;
 		CKPT_R_FP(r->read_sperate[i], sizeof(uint8_t)*(size_t)(r->read_length[i]/4+1), crc);
 	}
 
 
 	r->name = (char*)malloc(sizeof(char)*r->total_name_length);
+	if (!r->name) return 0;
 	CKPT_R_FP(r->name, sizeof(char)*(size_t)r->total_name_length, crc);
 
 	r->name_index = (uint64_t*)malloc(sizeof(uint64_t)*r->name_index_size);
+	if (!r->name_index) return 0;
 	CKPT_R_FP(r->name_index, sizeof(uint64_t)*(size_t)r->name_index_size, crc);
 
 	/****************************may have bugs********************************/
 	r->trio_flag = (uint8_t*)malloc(sizeof(uint8_t)*r->total_reads);
+	if (!r->trio_flag) return 0;
 	CKPT_R_FP(r->trio_flag, sizeof(uint8_t)*(size_t)r->total_reads, crc);
-	CKPT_R_FP(&(asm_opt.hom_cov), sizeof(asm_opt.hom_cov), crc);
-    CKPT_R_FP(&(asm_opt.het_cov), sizeof(asm_opt.het_cov), crc);
+	CKPT_R_FP(&lhom, sizeof(lhom), crc);
+	CKPT_R_FP(&lhet, sizeof(lhet), crc);
 	/****************************may have bugs********************************/
 
 	r->cigars = (Compressed_Cigar_record*)malloc(sizeof(Compressed_Cigar_record)*r->total_reads);
@@ -227,13 +249,16 @@ int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
 	if (asm_opt.is_sc) {
 		if((fread(&mm, sizeof(mm), 1, fp)) && (mm == 1)) {
 			if (crc) *crc = crc32(*crc, (const Bytef*)&mm, (uInt)sizeof(mm));
-			MALLOC(r->rsc, r->total_reads);
+			r->rsc = (uint8_t**)calloc(r->total_reads, sizeof(uint8_t*));
+			if (!r->rsc) return 0;
 			for (i = 0; i < r->total_reads; i++) {
-				MALLOC(r->rsc[i], (r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0));
+				r->rsc[i] = (uint8_t*)malloc((r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0));
+				if (!r->rsc[i]) return 0;
 				CKPT_R_FP(r->rsc[i], sizeof(uint8_t)*(size_t)((r->read_length[i]/sc_bn) + ((r->read_length[i]%sc_bn)?1:0)), crc);
 			}
 		}
 	}
+	asm_opt.hom_cov = lhom; asm_opt.het_cov = lhet;
 	return 1;
 }
 

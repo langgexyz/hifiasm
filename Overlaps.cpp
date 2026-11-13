@@ -23465,12 +23465,13 @@ void write_ma_hit_ts(ma_hit_t_alloc* x, long long n_read, char* read_file_name)
 
 
     free(index_name);
-    fflush(fp);
-	fsync(fileno(fp));
-    fclose(fp);
-	if (rename(tmp_name, index_name) != 0) unlink(tmp_name);
+    int bad = ferror(fp);
+    if (fflush(fp) != 0) bad = 1;
+	if (fsync(fileno(fp)) != 0) bad = 1;
+    if (fclose(fp) != 0) bad = 1;
+	if (bad || rename(tmp_name, index_name) != 0) { unlink(tmp_name); fprintf(stderr, "ma_hit_ts write failed.\n"); }
+    else fprintf(stderr, "ma_hit_ts has been written.\n");
     free(tmp_name);
-    fprintf(stderr, "ma_hit_ts has been written.\n");
 }
 
 

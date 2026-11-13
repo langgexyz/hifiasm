@@ -33,14 +33,26 @@ extern hifiasm_opt_t asm_opt;
  *   OV payload  : paf{n,buffer} | rpaf{n,buffer}
  *******************************************************************************************/
 
+/* crc32() takes uInt (32-bit); chunk so >4GB sections are fully covered */
+static uint32_t ckpt_crc32(uint32_t crc, const void *p, uint64_t n)
+{
+	const uint8_t *b = (const uint8_t*)p;
+	while (n) {
+		uInt c = (n > 0x7fffffffULL) ? 0x7fffffffU : (uInt)n;
+		crc = crc32(crc, b, c);
+		b += c; n -= c;
+	}
+	return crc;
+}
+
 #define CKPT_W(fp, p, n, c) do { \
 	fwrite((p), 1, (n), (fp)); \
-	if (c) *(c) = crc32(*(c), (const Bytef*)(p), (uInt)(n)); \
+	if (c) *(c) = ckpt_crc32(*(c), (const Bytef*)(p), (n)); \
 } while (0)
 
 #define CKPT_RD(fp, p, n, c) do { \
 	if (fread((p), 1, (n), (fp)) != (size_t)(n)) return 0; \
-	if (c) *(c) = crc32(*(c), (const Bytef*)(p), (uInt)(n)); \
+	if (c) *(c) = ckpt_crc32(*(c), (const Bytef*)(p), (n)); \
 } while (0)
 
 static uint64_t fnv1a(uint64_t h, const void *p, uint64_t n)
@@ -81,6 +93,8 @@ uint64_t ha_ckpt_params_hash(void)
 	h = fnv1a(h, &o->dp_e, sizeof(o->dp_e));
 	h = fnv1a(h, &o->is_ont, sizeof(o->is_ont));
 	h = fnv1a(h, &o->is_sc, sizeof(o->is_sc));
+	h = fnv1a(h, &o->rl_cut, sizeof(o->rl_cut));
+	h = fnv1a(h, &o->sc_cut, sizeof(o->sc_cut));
 	h = fnv1a(h, &o->mz_rewin, sizeof(o->mz_rewin));
 	h = fnv1a(h, &o->mz_sample_dist, sizeof(o->mz_sample_dist));
 	h = fnv1a(h, &o->max_kmer_cnt, sizeof(o->max_kmer_cnt));
@@ -130,12 +144,11 @@ static FILE *ckpt_fopen_atomic(const char *path, char **tmp_path)
 
 static int ckpt_rename_sync(FILE *fp, const char *tmp, const char *path)
 {
-	int fd;
-	fflush(fp);
-	fd = fileno(fp);
-	if (fd >= 0) fsync(fd);
-	if (fclose(fp) != 0) { unlink(tmp); free((void*)tmp); return 0; }
-	if (rename(tmp, path) != 0) { unlink(tmp); free((void*)tmp); return 0; }
+	int bad = ferror(fp);   /* catches any earlier failed fwrite */
+	if (fflush(fp) != 0) bad = 1;
+	if (fileno(fp) >= 0 && fsync(fileno(fp)) != 0) bad = 1;
+	if (fclose(fp) != 0) bad = 1;
+	if (bad || rename(tmp, path) != 0) { unlink(tmp); free((void*)tmp); return 0; }
 	free((void*)tmp);
 	return 1;
 }
@@ -182,7 +195,7 @@ static void wr_paf_arr(FILE *fp, ma_hit_t_alloc *paf, uint64_t n, uint32_t *crc)
 	}
 }
 
-static int rd_paf_arr(FILE *fp, ma_hit_t_alloc *paf, uint64_t n, uint32_t *crc)
+static int rd_paf_arr(FILE *fp, ma_hit_t_alloc *paf, uint64_t n, uint32_t *crc, uint64_t fsz)
 {
 	uint64_t i;
 	for (i = 0; i < n; ++i) {
@@ -192,6 +205,8 @@ static int rd_paf_arr(FILE *fp, ma_hit_t_alloc *paf, uint64_t n, uint32_t *crc)
 		paf[i].size = paf[i].length;
 		paf[i].buffer = NULL;
 		if (paf[i].length) {
+			/* a stored buffer can't exceed the file it lives in */
+			if (paf[i].length > fsz/sizeof(ma_hit_t)) return 0;
 			paf[i].buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*paf[i].length);
 			if (!paf[i].buffer) return 0;
 			CKPT_RD(fp, paf[i].buffer, sizeof(ma_hit_t)*paf[i].length, crc);
@@ -212,13 +227,14 @@ static void wr_cc(FILE *fp, const cc_v *cc, uint64_t n, uint32_t *crc)
 	}
 }
 
-static int rd_cc(FILE *fp, cc_v *cc, uint64_t n, uint32_t *crc)
+static int rd_cc(FILE *fp, cc_v *cc, uint64_t n, uint32_t *crc, uint64_t fsz)
 {
 	uint64_t i;
 	for (i = 0; i < n; ++i) {
 		uint64_t m = 0; uint8_t f = 0;
 		CKPT_RD(fp, &m, sizeof(m), crc);
 		CKPT_RD(fp, &f, sizeof(f), crc);
+		if (m > fsz/sizeof(uint16_t)) return 0;
 		if (m > cc->a[i].m) { REALLOC(cc->a[i].a, m); cc->a[i].m = m; }
 		cc->a[i].n = m;
 		if (m) CKPT_RD(fp, cc->a[i].a, sizeof(uint16_t)*m, crc);
@@ -249,10 +265,17 @@ static int ckpt_write_one(const char *path, int64_t round, void *flt_tab,
 	prev = ftell(fp);
 
 	u8 = (flt_tab != NULL); CKPT_W(fp, &u8, 1, &crc);
-	if (u8) { if (!ckpt_ft_save(flt_tab, fp)) { fclose(fp); unlink(tmp); free(tmp); return 0; } }
-	/* flt_tab body is opaque; fold it into crc by hashing file bytes later is
-	   not trivial -- crc covers the sections we serialize ourselves, the
-	   FIN_MAGIC footer still guarantees the file is complete */
+	if (u8) {
+		/* buffer the opaque flt_tab bytes so the section is CRC-covered */
+		char *mb = NULL; size_t mn = 0;
+		FILE *mf = open_memstream(&mb, &mn);
+		int ok = mf && ckpt_ft_save(flt_tab, mf);
+		if (mf) fclose(mf);
+		if (!ok) { free(mb); fclose(fp); unlink(tmp); free(tmp); return 0; }
+		u64 = mn; CKPT_W(fp, &u64, sizeof(u64), &crc);
+		CKPT_W(fp, mb, mn, &crc);
+		free(mb);
+	}
 	if (sz_flt) *sz_flt = sec_mrk(fp, &prev);
 
 	write_All_reads_fp(&R_INF, fp, &crc);
@@ -305,6 +328,40 @@ int ha_ckpt_write_round(int64_t round, void *flt_tab)
 	return ok;
 }
 
+/* free whatever load_All_reads_fp managed to allocate before failing;
+   pointer arrays are calloc'd so unfilled slots are NULL and safe */
+static void free_partial_reads(All_reads *r)
+{
+	uint64_t i;
+	for (i = 0; i < r->total_reads; ++i) {
+		if (r->N_site) free(r->N_site[i]);
+		if (r->read_sperate) free(r->read_sperate[i]);
+		if (r->cigars) { free(r->cigars[i].record); free(r->cigars[i].lost_base); }
+		if (r->second_round_cigar) { free(r->second_round_cigar[i].record); free(r->second_round_cigar[i].lost_base); }
+		if (r->rsc) free(r->rsc[i]);
+	}
+	free(r->N_site); free(r->read_length); free(r->read_size);
+	free(r->read_sperate); free(r->name); free(r->name_index);
+	free(r->trio_flag); free(r->cigars); free(r->second_round_cigar); free(r->rsc);
+}
+
+static void free_paf_arr(ma_hit_t_alloc *paf, uint64_t n)
+{
+	uint64_t i;
+	if (!paf) return;
+	for (i = 0; i < n; ++i) free(paf[i].buffer);
+	free(paf);
+}
+
+static void free_cc_v(cc_v *c)
+{
+	uint64_t i;
+	if (!c->a) return;
+	for (i = 0; i < c->m; ++i) free(c->a[i].a);
+	free(c->a); free(c->f);
+	c->a = NULL; c->f = NULL; c->n = c->m = 0;
+}
+
 static int ckpt_read_one(const char *path, int64_t exp_round, void **flt_tab, All_reads *tmp)
 {
 	FILE *fp = fopen(path, "r");
@@ -312,47 +369,91 @@ static int ckpt_read_one(const char *path, int64_t exp_round, void **flt_tab, Al
 	uint32_t crc = 0, file_crc;
 	uint8_t u8;
 	int rh;
+	struct stat st;
+	uint64_t fsz = 0;
+	void *lft = NULL;
+	cc_v lscc, lscb, lsca;
+	int64_t lchain = 0;
 	if (!fp) return 0;
+	memset(&lscc, 0, sizeof(lscc));
+	memset(&lscb, 0, sizeof(lscb));
+	memset(&lsca, 0, sizeof(lsca));
+	if (fstat(fileno(fp), &st) == 0) fsz = (uint64_t)st.st_size;
 	rh = rd_hdr(fp, HA_CKPT_STAGE_SNAP, &round, &n_reads);
-	if (rh <= 0 || round != exp_round || n_reads == 0) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s hdr fail rh=%d round=%lld n=%lu\n", path, rh, (long long)round, (unsigned long)n_reads); return 0; }
+	if (rh <= 0 || round != exp_round || n_reads == 0 || n_reads > fsz/16)
+		{ fprintf(stderr, "[ckpt-dbg] %s hdr fail rh=%d round=%lld n=%lu\n", path, rh, (long long)round, (unsigned long)n_reads); goto fail; }
 
-	CKPT_RD(fp, &u8, 1, &crc);
-	if (u8) { if (!ckpt_ft_load(flt_tab, fp)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s ft fail\n", path); return 0; } }
+#define CKPT_RD_GF(p, n) do { \
+	if (fread((p), 1, (n), fp) != (size_t)(n)) goto fail; \
+	crc = ckpt_crc32(crc, (const Bytef*)(p), (n)); \
+} while (0)
 
-	if (!load_All_reads_fp(tmp, fp, &crc)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s reads fail\n", path); return 0; }
+	CKPT_RD_GF(&u8, 1);
+	if (u8) {
+		uint64_t mn; uint8_t *mb; FILE *mf; int ok;
+		CKPT_RD_GF(&mn, sizeof(mn));
+		if (mn > fsz) goto fail;
+		mb = (uint8_t*)malloc(mn ? mn : 1);
+		if (!mb) goto fail;
+		if (fread(mb, 1, mn, fp) != mn) { free(mb); goto fail; }
+		crc = ckpt_crc32(crc, mb, mn);
+		mf = fmemopen(mb, mn, "r");
+		ok = mf && ckpt_ft_load(&lft, mf);
+		if (mf) fclose(mf);
+		free(mb);
+		if (!ok) { fprintf(stderr, "[ckpt-dbg] %s ft fail\n", path); goto fail; }
+	}
+
+	if (!load_All_reads_fp(tmp, fp, &crc)) { fprintf(stderr, "[ckpt-dbg] %s reads fail\n", path); goto fail; }
+	if (tmp->total_reads != n_reads) { fprintf(stderr, "[ckpt-dbg] %s n_reads mismatch\n", path); goto fail; }
 
 	tmp->paf = (ma_hit_t_alloc*)calloc(n_reads, sizeof(ma_hit_t_alloc));
 	tmp->reverse_paf = (ma_hit_t_alloc*)calloc(n_reads, sizeof(ma_hit_t_alloc));
-	if (!tmp->paf || !tmp->reverse_paf) { fclose(fp); return 0; }
-	if (!rd_paf_arr(fp, tmp->paf, n_reads, &crc)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s paf fail\n", path); return 0; }
-	if (!rd_paf_arr(fp, tmp->reverse_paf, n_reads, &crc)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s rpaf fail\n", path); return 0; }
+	if (!tmp->paf || !tmp->reverse_paf) goto fail;
+	if (!rd_paf_arr(fp, tmp->paf, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s paf fail\n", path); goto fail; }
+	if (!rd_paf_arr(fp, tmp->reverse_paf, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s rpaf fail\n", path); goto fail; }
 
-	CKPT_RD(fp, &u8, 1, &crc);
+	CKPT_RD_GF(&u8, 1);
 	if (u8) {
-		scc.n = scc.m = n_reads; CALLOC(scc.a, n_reads); CALLOC(scc.f, n_reads);
-		if (!rd_cc(fp, &scc, n_reads, &crc)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s scc fail\n", path); return 0; }
+		lscc.n = lscc.m = n_reads; CALLOC(lscc.a, n_reads); CALLOC(lscc.f, n_reads);
+		if (!rd_cc(fp, &lscc, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s scc fail\n", path); goto fail; }
 	}
-	CKPT_RD(fp, &u8, 1, &crc);
+	CKPT_RD_GF(&u8, 1);
 	if (u8) {
-		scb.n = scb.m = n_reads; CALLOC(scb.a, n_reads);
-		if (!rd_cc(fp, &scb, n_reads, &crc)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s scb fail\n", path); return 0; }
+		lscb.n = lscb.m = n_reads; CALLOC(lscb.a, n_reads);
+		if (!rd_cc(fp, &lscb, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s scb fail\n", path); goto fail; }
 	}
-	CKPT_RD(fp, &u8, 1, &crc);
+	CKPT_RD_GF(&u8, 1);
 	if (u8) {
-		sca.n = sca.m = n_reads; CALLOC(sca.a, n_reads);
-		if (!rd_cc(fp, &sca, n_reads, &crc)) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s sca fail\n", path); return 0; }
+		lsca.n = lsca.m = n_reads; CALLOC(lsca.a, n_reads);
+		if (!rd_cc(fp, &lsca, n_reads, &crc, fsz)) { fprintf(stderr, "[ckpt-dbg] %s sca fail\n", path); goto fail; }
 	}
 
-	{ int64_t v;
-	  CKPT_RD(fp, &v, sizeof(v), &crc); asm_opt.max_n_chain = v; }
+	CKPT_RD_GF(&lchain, sizeof(lchain));
 
-	if (fread(&u64, sizeof(u64), 1, fp) != 1) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s crc missing\n", path); return 0; }
+	if (fread(&u64, sizeof(u64), 1, fp) != 1) { fprintf(stderr, "[ckpt-dbg] %s crc missing\n", path); goto fail; }
 	file_crc = (uint32_t)u64;
-	if (fread(&u64, sizeof(u64), 1, fp) != 1 || u64 != HA_CKPT_FIN_MAGIC) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s fin fail\n", path); return 0; }
-	if (file_crc != crc) { fclose(fp); fprintf(stderr, "[ckpt-dbg] %s crc mismatch %x vs %x\n", path, file_crc, crc); return 0; }
+	if (fread(&u64, sizeof(u64), 1, fp) != 1 || u64 != HA_CKPT_FIN_MAGIC) { fprintf(stderr, "[ckpt-dbg] %s fin fail\n", path); goto fail; }
+	if (file_crc != crc) { fprintf(stderr, "[ckpt-dbg] %s crc mismatch %x vs %x\n", path, file_crc, crc); goto fail; }
 	fclose(fp);
-	if (tmp->total_reads != n_reads) { fprintf(stderr, "[ckpt-dbg] %s n_reads mismatch\n", path); return 0; }
+
+	/* commit: file fully verified, now update globals */
+	if (lft) { if (*flt_tab) ha_ft_destroy(*flt_tab); *flt_tab = lft; }
+	free_cc_v(&scc); scc = lscc;
+	free_cc_v(&scb); scb = lscb;
+	free_cc_v(&sca); sca = lsca;
+	asm_opt.max_n_chain = lchain;
 	return 1;
+
+fail:
+	fclose(fp);
+	if (lft) ha_ft_destroy(lft);
+	free_cc_v(&lscc); free_cc_v(&lscb); free_cc_v(&lsca);
+	free_paf_arr(tmp->paf, n_reads);
+	free_paf_arr(tmp->reverse_paf, n_reads);
+	free_partial_reads(tmp);
+	memset(tmp, 0, sizeof(*tmp));
+	return 0;
 }
 
 int64_t ha_ckpt_load_latest(void **flt_tab)
@@ -561,6 +662,8 @@ static int stream_rescan(ha_ckpt_stream_t *s, FILE *fp)
 	rh = rd_hdr(fp, s->stage, &round, &n_reads);
 	if (rh <= 0 || round != s->round || n_reads != s->n_reads) return 0;
 	good = ftell(fp);
+	uint64_t fsz = 0;
+	{ struct stat st; if (fstat(fileno(fp), &st) == 0) fsz = (uint64_t)st.st_size; }
 
 	for (;;) {
 		uint16_t magic; uint32_t stage; uint64_t rid, plen; uint32_t crc;
@@ -568,10 +671,11 @@ static int stream_rescan(ha_ckpt_stream_t *s, FILE *fp)
 		if (fread(&stage, sizeof(stage), 1, fp) != 1 || stage != s->stage) break;
 		if (fread(&rid, sizeof(rid), 1, fp) != 1 || rid >= s->n_reads) break;
 		if (fread(&plen, sizeof(plen), 1, fp) != 1) break;
+		if (fsz && plen > fsz) break;
 		if (plen > payload_cap) {
-			payload = (uint8_t*)realloc(payload, plen);
-			if (!payload) break;
-			payload_cap = plen;
+			uint8_t *nb = (uint8_t*)realloc(payload, plen);
+			if (!nb) break;
+			payload = nb; payload_cap = plen;
 		}
 		if (fread(payload, 1, plen, fp) != (size_t)plen) break;
 		if (fread(&crc, sizeof(crc), 1, fp) != 1) break;
@@ -617,7 +721,6 @@ ha_ckpt_stream_t *ha_ckpt_stream_open(int stage, int64_t round, uint64_t n_reads
 			(unsigned long)n_reads, path);
 	} else {
 		if (old) fclose(old);
-		if (s->n_done) fprintf(stderr, "[M::%s] !! stale %s ignored\n", __func__, path);
 		unlink(path);   /* incompatible header -> start over */
 		s->n_done = 0;
 		memset(s->done, 0, n_reads);
@@ -635,6 +738,7 @@ static void stream_append(ha_ckpt_stream_t *s, uint64_t rid, const uint8_t *payl
 	uint32_t stage = s->stage;
 	uint32_t crc = (uint32_t)crc32(0, payload, (uInt)plen);
 
+	int dosync;
 	pthread_mutex_lock(&s->mut);
 	fwrite(&magic, sizeof(magic), 1, s->fp);
 	fwrite(&stage, sizeof(stage), 1, s->fp);
@@ -643,11 +747,12 @@ static void stream_append(ha_ckpt_stream_t *s, uint64_t rid, const uint8_t *payl
 	fwrite(payload, 1, plen, s->fp);
 	fwrite(&crc, sizeof(crc), 1, s->fp);
 	fflush(s->fp);                        /* kill-safe: pushes to page cache */
-	if (s->fsync_sec > 0 && yak_realtime() - s->last_fsync >= s->fsync_sec) {
-		fsync(fileno(s->fp));
-		s->last_fsync = yak_realtime();
-	}
+	dosync = (s->fsync_sec > 0 && yak_realtime() - s->last_fsync >= s->fsync_sec);
+	if (dosync) s->last_fsync = yak_realtime();
 	pthread_mutex_unlock(&s->mut);
+	/* fsync outside the lock: it covers whatever is dirty at call time,
+	   so a concurrent append only adds to what gets synced */
+	if (dosync) fsync(fileno(s->fp));
 }
 
 void ha_ckpt_dump_ec(ha_ckpt_stream_t *s, uint64_t rid)
@@ -692,12 +797,11 @@ void ha_ckpt_purge(void)
 {
 	char *n;
 	int64_t r;
-	for (r = -1; r < (int64_t)asm_opt.number_of_round + 1; ++r) {
-		if (r >= 0) {
-			n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.snap", r); unlink(n); free(n);
-			n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.snap.tmp", r); unlink(n); free(n);
-			n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.ecstr", r); unlink(n); free(n);
-		}
+	/* sweep a fixed window: a previous run may have used a different -r */
+	for (r = 0; r < 64; ++r) {
+		n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.snap", r); unlink(n); free(n);
+		n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.snap.tmp", r); unlink(n); free(n);
+		n = ckpt_name(asm_opt.output_file_name, "%s.r%lld.ecstr", r); unlink(n); free(n);
 	}
 	n = ckpt_name(asm_opt.output_file_name, "%s.ff.ovstr", -1); unlink(n); free(n);
 	/* stale .tmp litter from runs killed mid-atomic-write */

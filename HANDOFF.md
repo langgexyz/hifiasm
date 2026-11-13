@@ -109,3 +109,44 @@ cd test_ckpt && ./kill_resume_test.sh ../hifiasm <reads.fa> <outdir> 16 [ecstr�
 - 所有结论均为实测；不要再假设未验证的加速比
 - `ec.bin` 在多轮正常跑之间字节也不同（非确定性），正确性判据=GFA bit-exact
 - 9009 是生产机：只观察，不要拷文件、不要跑测试
+
+---
+
+## 多机分片可行性验证（2026 最新，已验证）
+
+**结论：纠错阶段按 read 分片跨机可行，集合级无损；但 read 内条目顺序是调度依赖的，合并需要规范化排序。**
+
+实验（9036，426Mb reads，-t16 -r1，`HIFIASM_SHARD=k/N` + `HIFIASM_PAF_DUMP` 探针）:
+
+| 检查 | 结果 |
+|---|---|
+| shard0 + shard1 PAF 合并 vs 完整跑 | **817,984 行，集合逐字节相等** |
+| 两次同配置完整跑互比 | 顺序 0 差异（同配置确定） |
+| shard vs 完整：同一 read 内条目顺序 | 98% 的 read 有差异（worker 线程缓冲调度依赖，原二进制固有，跨 -t 也存在；GFA 不受影响） |
+
+含义/工程要求：
+- 分片产出**正确的结果集**，但原始 PAF 不能 byte-diff；合并工具需**按 read 分组 + 组内规范排序**(sort by tn/coords)，或直接用最终 GFA 作验收
+- index 各机本地重建已验证等价
+- 预期收益：纠错占 58% 可 50/50 切分，2 机省 ~25-30%，3 机 ~40%（待端到端实测）
+- 未验证项：多轮同步（每轮后需交换修正序列）、index 跨机构建逐位一致性、真实双机端到端耗时
+
+## ckpt 代码评审问题处理（本轮已修）
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| 中 | `ckpt_read_one` 失败路径泄漏/半成品状态（tmp 不释放、hom/het_cov 提前覆盖、max_n_chain 先写后验） | **已修**：全部加载入局部变量，CRC 全量验证后才提交全局；`free_partial_reads`/`free_cc_v`/`free_paf_arr` 清理；指针数组改 calloc 保证部分释放安全 |
+| 中 | fwrite/fflush/fsync 返回值不检查，磁盘满会把截断文件 rename 成正文件 | **已修**:`ckpt_rename_sync`/`write_All_reads`/`write_ma_hit_ts` 加 ferror+fflush+fsync+fclose 检查，失败不 rename、不打印成功 |
+| 中 | flt_tab 正文不在 CRC 内，中段位翻转静默出错 | **已修**:open_memstream 缓冲后长度前缀+整块 CRC,**FMT_VER 2→3**（旧快照自动拒绝） |
+| 低 | `(uInt)(n)` 截断，>4GB section CRC 只覆盖低 32 位 | **已修**:`ckpt_crc32` 分块 |
+| 低 | rd_cc/rd_paf_arr/stream plen 先按文件长度字段分配后校验 | **已修**：全部按 fstat 文件大小做 sanity bound |
+| 低 | `load_All_reads_fp` 指针数组 malloc 未初始化，部分加载无法安全释放 | **已修**:N_site/read_sperate/rsc 改 calloc;hom/het_cov 末尾才提交 |
+| 低 | stream_append 持锁 fsync | **已修**:fsync 移出 mutex（覆盖语义不变） |
+| 低 | stream_rescan realloc 丢旧指针 | **已修** |
+| 低 | ha_ckpt_purge 清不掉不同 -r 的遗留 | **已修**：固定清扫 r0..r63 |
+| 低 | "stale ignored" 死代码、HA_CKPT_NO_FLUSH 未用 | **已删** |
+| 低 | params_hash 缺 rl_cut/sc_cut | **已补** |
+| — | ckpt 默认开启的开销（报 173% 是载机上的误测） | 9036 安静机实测 **~1-3%**，维持默认开；--ckpt-int 0 可关 |
+| — | ha_assemble_pair 回放陈旧 ecstr | 已确认安全：`ha_ckpt_on` 排除 sec_in 路径 |
+| — | params_hash 字段运行中是否被改 | max_n_chain 单独快照处理；flag 的 HA_F_PARTITION 变更在建图阶段（ckpt 写入之后），无影响 |
+
+验收：harness 重跑通过（SIGKILL→resume→4×GFA bit-exact,WAL 回放 323/2924)。

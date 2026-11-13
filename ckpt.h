@@ -26,15 +26,13 @@
 
 #define HA_CKPT_HDR_MAGIC   "HICKPT01"
 #define HA_CKPT_FIN_MAGIC   0x314E494650544b43ULL
-#define HA_CKPT_FMT_VER     2u
+/* v3: flt_tab section is length-prefixed and CRC-covered */
+#define HA_CKPT_FMT_VER     3u
 #define HA_CKPT_REC_MAGIC   0x5243u
 
 #define HA_CKPT_STAGE_EC    0u
 #define HA_CKPT_STAGE_OV    1u
 #define HA_CKPT_STAGE_SNAP  2u
-
-/* off: disabled; positive: fsync interval seconds for stream records */
-#define HA_CKPT_NO_FLUSH   -1
 
 typedef struct {
 	FILE *fp;
