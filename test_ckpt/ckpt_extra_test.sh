@@ -282,6 +282,69 @@ done
 [ $vok -eq 1 ] || fail=1
 fi
 
+if want W; then
+echo "===== [W] 仅 WAL 无 snap 的 resume (round0 杀) ====="
+rm -f wo.*
+if kill_run wo "wo.r0.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    ls wo.*.snap 2>/dev/null && echo "[W] 注意: kill 时已有 snap"
+    $HIFIASM -o wo -t$T "$READS" 2>wo_r.log
+    N=$(grep -o "resumed [0-9]*/[0-9]* reads" wo_r.log | tail -1)
+    echo "[W] 无 snap, 仅 WAL 回放: ${N:-无}"
+    grep -q "resumed checkpoint" wo_r.log && echo "[W] 注: kill 偏晚, snap 已写 -> 走了 snap+WAL 路径"
+    cmp_gfa bb wo W
+else echo "SKIP W"; fi
+fi
+
+if want X; then
+echo "===== [X] 收尾阶段 kill (write contig output) ====="
+rm -f xl.*
+if kill_run_log xl "graph: write contig output" "$HIFIASM -t$T $READS"; then
+    $HIFIASM -o xl -t$T "$READS" 2>xl_r.log
+    cmp_gfa bb xl X
+else echo "SKIP X"; fi
+fi
+
+if want Y; then
+echo "===== [Y] ovstr 中段单字节损坏 -> ov_apply 截断回放 ====="
+rm -f yc.*
+if kill_run yc "yc.ff.ovstr" "$OVTH" "$HIFIASM -t$T $READS"; then
+    OFF=$(( $(fsz yc.ff.ovstr) / 2 ))
+    printf '\xFF' | dd of=yc.ff.ovstr bs=1 seek=$OFF conv=notrunc 2>/dev/null
+    $HIFIASM -o yc -t$T "$READS" 2>yc_r.log
+    N=$(grep -o "resumed [0-9]*/[0-9]* reads" yc_r.log | tail -1)
+    echo "[Y] ovstr 回放: ${N:-无}"
+    cmp_gfa bb yc Y
+else echo "SKIP Y"; fi
+fi
+
+if want Z1; then
+echo "===== [Z1] --dbg-ovec 门控 -> 不写任何 ckpt ====="
+rm -f dg.*
+$HIFIASM -o dg -t$T --dbg-ovec "$READS" 2>dg.log && RC=0 || RC=1
+NC=$(ls dg.*.snap dg.*.ecstr dg.*.ovstr 2>/dev/null | wc -l | tr -d ' ')
+[ $RC -eq 0 ] && [ "$NC" -eq 0 ] && echo "OK   Z1: 门控生效, 0 个 ckpt 文件" || { echo "FAIL Z1: rc=$RC ckpt文件=$NC"; fail=1; }
+fi
+
+if want Z2; then
+echo "===== [Z2] --write-ec + kill/resume 共存 ====="
+rm -f we.*
+if kill_run we "we.r1.ecstr" "$THRESH" "$HIFIASM -t$T --write-ec $READS"; then
+    $HIFIASM -o we -t$T --write-ec "$READS" 2>we_r.log
+    grep -q "resumed" we_r.log && echo "OK   Z2: --write-ec 下正常 resume" || { echo "FAIL Z2"; fail=1; }
+    cmp_gfa bb we Z2
+    ls we.ec.bin >/dev/null 2>&1 && echo "OK   Z2: .ec.bin 已产出" || echo "[Z2] 注: 无 we.ec.bin"
+else echo "SKIP Z2"; fi
+fi
+
+if want Z3; then
+echo "===== [Z3] --ckpt-int 1 (激进 fsync) kill/resume ====="
+rm -f ci.*
+if kill_run ci "ci.r1.ecstr" "$THRESH" "$HIFIASM -t$T --ckpt-int 1 $READS"; then
+    $HIFIASM -o ci -t$T --ckpt-int 1 "$READS" 2>ci_r.log
+    cmp_gfa bb ci Z3
+else echo "SKIP Z3"; fi
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
