@@ -378,6 +378,29 @@ if kill_run subd/sd "subd/sd.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
 else echo "SKIP AB"; fi
 fi
 
+if want AC; then
+echo "===== [AC] snap 写入瞬间 kill -> 半成品 .tmp 不得被当快照 ====="
+# 大数据集下 snap 序列化要秒级; 等 round prog 到 100% 立刻杀, 落在写盘窗口内
+rm -f sw.*
+$HIFIASM -o sw -t$T "$READS" 2>sw.log & pid=$!
+t=0; hit=0
+while [ $t -lt 7200 ]; do
+    kill -0 $pid 2>/dev/null || break
+    grep -qE "ec round 1/[0-9]+.*100%" sw.log 2>/dev/null && { hit=1; break; }
+    sleep 0.05; t=$((t+1))
+done
+if [ $hit -eq 1 ] && kill -0 $pid 2>/dev/null; then
+    kill -9 $pid; wait $pid 2>/dev/null; sleep 1
+    echo "[AC] kill 现场: $(ls sw.*.snap* sw.*.ecstr 2>/dev/null | tr '\n' ' ')"
+    $HIFIASM -o sw -t$T "$READS" 2>sw_r.log
+    grep -E "resumed" sw_r.log | head -3
+    cmp_gfa bb sw AC
+else
+    kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
+    echo "SKIP AC(没逮到写盘窗口, 需要大数据集)"
+fi
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
