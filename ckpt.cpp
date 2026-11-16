@@ -27,7 +27,7 @@ extern hifiasm_opt_t asm_opt;
  *
  * stream    <prefix>.r<round>.ecstr / <prefix>.ff.ovstr
  *   hdr : same, stage=EC/OV
- *   rec : REC_MAGIC | stage | rid | plen | payload | crc32(payload)
+ *   rec : REC_MAGIC | stage | rid | plen | payload | crc32(stage|rid|plen|payload)
  *   EC payload  : trio_flag | het | scc{n,f,a} | scb{n,a} | sca{n,a} |
  *                 paf{fc,ab,n,buffer} | rpaf{fc,ab,n,buffer}
  *   OV payload  : paf{n,buffer} | rpaf{n,buffer}
@@ -736,7 +736,12 @@ static int stream_rescan(ha_ckpt_stream_t *s, FILE *fp)
 		}
 		if (fread(payload, 1, plen, fp) != (size_t)plen) break;
 		if (fread(&crc, sizeof(crc), 1, fp) != 1) break;
-		if (crc != (uint32_t)crc32(0, payload, (uInt)plen)) break;
+		uint32_t want = 0;
+		want = (uint32_t)crc32(want, (const Bytef*)&stage, sizeof(stage));
+		want = (uint32_t)crc32(want, (const Bytef*)&rid, sizeof(rid));
+		want = (uint32_t)crc32(want, (const Bytef*)&plen, sizeof(plen));
+		want = (uint32_t)crc32(want, payload, (uInt)plen);
+		if (crc != want) break;
 		if ((s->stage == HA_CKPT_STAGE_EC ? ec_apply(s, payload, plen, rid)
 		                                : ov_apply(s, payload, plen, rid)) == 0) break;
 		s->done[rid] = 1;
@@ -793,7 +798,13 @@ static void stream_append(ha_ckpt_stream_t *s, uint64_t rid, const uint8_t *payl
 {
 	uint16_t magic = HA_CKPT_REC_MAGIC;
 	uint32_t stage = s->stage;
-	uint32_t crc = (uint32_t)crc32(0, payload, (uInt)plen);
+	/* CRC covers stage|rid|plen|payload: a bit flip in rid must not let a
+	 * valid record land in the wrong read slot */
+	uint32_t crc = 0;
+	crc = (uint32_t)crc32(crc, (const Bytef*)&stage, sizeof(stage));
+	crc = (uint32_t)crc32(crc, (const Bytef*)&rid, sizeof(rid));
+	crc = (uint32_t)crc32(crc, (const Bytef*)&plen, sizeof(plen));
+	crc = (uint32_t)crc32(crc, payload, (uInt)plen);
 
 	int dosync;
 	pthread_mutex_lock(&s->mut);

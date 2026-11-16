@@ -26,8 +26,8 @@
 
 #define HA_CKPT_HDR_MAGIC   "HICKPT01"
 #define HA_CKPT_FIN_MAGIC   0x314E494650544b43ULL
-/* v3: flt_tab section is length-prefixed and CRC-covered */
-#define HA_CKPT_FMT_VER     3u
+/* v4: stream record CRC covers stage|rid|plen|payload (v3 covered payload only) */
+#define HA_CKPT_FMT_VER     4u
 #define HA_CKPT_REC_MAGIC   0x5243u
 
 #define HA_CKPT_STAGE_EC    0u
