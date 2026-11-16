@@ -94,6 +94,7 @@ if kill_run_log ov "final overlap.*[3-9]0%" "$HIFIASM -t$T $READS"; then
 else echo "SKIP F"; fi
 fi
 
+if want G; then
 echo "===== [G] 快照字节损坏 -> 拒绝 + 干净重跑 ====="
 rm -f cs.*
 if kill_run cs "cs.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
@@ -110,6 +111,8 @@ if kill_run cs "cs.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
     cmp_gfa bb cs G
 else echo "SKIP G"; fi
 
+fi
+if want H; then
 echo "===== [H] 双崩溃幂等 kill->resume->kill->resume ====="
 rm -f dc.*
 if kill_run dc "dc.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
@@ -133,6 +136,8 @@ if kill_run dc "dc.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
     cmp_gfa bb dc H
 else echo "SKIP H"; fi
 
+fi
+if want I; then
 echo "===== [I] 参数变更 resume (--hg-size 1m->2m) ====="
 # 注: 不能用 --rl-cut —— 非 ONT 输入下被强制改写为 -1, 参数实际不变.
 # --hg-size 已进入 params_hash, 变更必须导致快照+WAL 被拒.
@@ -144,6 +149,8 @@ if kill_run pm "pm.r1.ecstr" "$THRESH" "$HIFIASM -t$T --hg-size 1m $READS"; then
     else echo "FAIL I: rc=$RC resumed行数=$N"; fail=1; fi
 else echo "SKIP I"; fi
 
+fi
+if want J; then
 echo "===== [J] resume 换线程数 ($T -> 2) ====="
 rm -f tc.*
 if kill_run tc "tc.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
@@ -152,6 +159,8 @@ if kill_run tc "tc.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
     cmp_gfa bb tc J
 else echo "SKIP J"; fi
 
+fi
+if want L; then
 echo "===== [L] resume 加 -i (忽略全部 ckpt) ====="
 rm -f li.*
 if kill_run li "li.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
@@ -160,6 +169,8 @@ if kill_run li "li.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
     cmp_gfa bb li L
 else echo "SKIP L"; fi
 
+fi
+if want M; then
 echo "===== [M] resume 加 --ckpt-int 0 (关闭 ckpt) ====="
 rm -f nc.*
 if kill_run nc "nc.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
@@ -168,6 +179,7 @@ if kill_run nc "nc.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
     cmp_gfa bb nc M
 else echo "SKIP M"; fi
 
+fi
 if want K; then
 echo "===== [K] ONT 模式 kill + resume (日志驱动, round2 ~50%处杀) ====="
 if [ -f "$ONT_READS" ]; then
