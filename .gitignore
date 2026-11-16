@@ -7,4 +7,5 @@ test_ckpt/*
 !test_ckpt/gen_reads.py
 !test_ckpt/kill_resume_test.sh
 !test_ckpt/ckpt_extra_test.sh
+!test_ckpt/ckpt_mp_test.sh
 .cache/
