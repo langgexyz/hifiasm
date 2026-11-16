@@ -241,6 +241,7 @@ int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc);
 int append_All_reads(All_reads* r, char *idx, uint32_t id);
 void destory_All_reads(All_reads* r);
 int destory_read_bin(All_reads* r);
+void reset_All_reads(All_reads* r);
 void init_Debug_reads(Debug_reads* x, const char* file);
 void destory_Debug_reads(Debug_reads* x);
 void recover_UC_sub_Read(UC_Read* i_r, long long start_pos, long long length, uint8_t strand, All_reads* R_INF, long long ID);
@@ -259,7 +260,7 @@ void write_compress_base_disk(FILE *fp, uint64_t ul_rid, char *str, uint32_t len
 int64_t load_compress_base_disk(FILE *fp, uint64_t *ul_rid, char *dest, uint32_t *len, ul_vec_t *buf);
 scaf_res_t *init_scaf_res_t(uint32_t n);
 void destroy_scaf_res_t(scaf_res_t *p);
-void read_ma(ma_hit_t* x, FILE* fp);
+void read_ma(ma_hit_t* x, FILE* fp, uint32_t *crc);
 
 const uint64_t sc_tb[8] = { 
 	10, 20, 30, 40, 50, 60, 70, 80

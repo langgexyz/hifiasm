@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <zlib.h>
 #include "Process_Read.h"
+#include "ckpt.h"
 #include "htab.h"
 #include "Correct.h"
 #include "kalloc.h"
@@ -67,6 +68,30 @@ void destory_All_reads(All_reads* r)
 	free(r->trio_flag);
 	free(r->rsc);
 	///if (r->pb_regions) free(r->pb_regions);
+}
+
+/* undo a failed/partial binary load: frees whatever was allocated (any
+ * per-read array may be NULL or only partly populated; the N_site and
+ * read_sperate arrays are calloc'd so unfilled slots are NULL) and leaves
+ * the struct zeroed so ha_pt_gen re-parses the real input files */
+void reset_All_reads(All_reads* r)
+{
+	uint64_t i;
+	if (r->N_site || r->read_sperate || r->cigars || r->second_round_cigar || r->rsc)
+		for (i = 0; i < r->total_reads; i++) {
+			if (r->N_site) free(r->N_site[i]);
+			if (r->read_sperate) free(r->read_sperate[i]);
+			if (r->cigars) { free(r->cigars[i].record); free(r->cigars[i].lost_base); }
+			if (r->second_round_cigar) { free(r->second_round_cigar[i].record); free(r->second_round_cigar[i].lost_base); }
+			if (r->rsc) free(r->rsc[i]);
+		}
+	if (r->paf) for (i = 0; i < r->total_reads; i++) free(r->paf[i].buffer);
+	if (r->reverse_paf) for (i = 0; i < r->total_reads; i++) free(r->reverse_paf[i].buffer);
+	free(r->paf); free(r->reverse_paf);
+	free(r->N_site); free(r->read_length); free(r->read_size);
+	free(r->read_sperate); free(r->name); free(r->name_index);
+	free(r->trio_flag); free(r->cigars); free(r->second_round_cigar); free(r->rsc);
+	memset(r, 0, sizeof(*r));
 }
 
 #define CKPT_W_FP(p, n, c) do { \
@@ -137,7 +162,10 @@ void write_All_reads(All_reads* r, char* read_file_name)
     sprintf(tmp_name, "%s.tmp", index_name);
     FILE* fp = fopen(tmp_name, "w");
 	if (!fp) { free(index_name); free(tmp_name); fprintf(stderr, "Reads write failed.\n"); return; }
-	write_All_reads_fp(r, fp, NULL);
+	uint32_t crc = 0;
+	write_All_reads_fp(r, fp, &crc);
+	uint64_t footer[2] = {crc, HA_CKPT_FIN_MAGIC};
+	fwrite(footer, sizeof(footer), 1, fp);
 	int bad = ferror(fp);
 	if (fflush(fp) != 0) bad = 1;
 	if (fsync(fileno(fp)) != 0) bad = 1;
@@ -154,9 +182,9 @@ int load_All_reads_fp(All_reads* r, FILE* fp, uint32_t *crc)
     CKPT_R_FP(&local_adapterLen, sizeof(local_adapterLen), crc);
     if(local_adapterLen != asm_opt.adapterLen)
     {
-        fprintf(stderr, "the adapterLen of index is: %d, but the adapterLen set by user is: %d\n", 
+        fprintf(stderr, "[WARN] the adapterLen of index is: %d, but the adapterLen set by user is: %d; cache ignored\n",
         local_adapterLen, asm_opt.adapterLen);
-		exit(1);
+		return 0;
     }
     CKPT_R_FP(&r->index_size, sizeof(r->index_size), crc);
 	CKPT_R_FP(&r->name_index_size, sizeof(r->name_index_size), crc);
@@ -271,36 +299,36 @@ int load_All_reads(All_reads* r, char* read_file_name)
     FILE* fp = fopen(index_name, "r");
     free(index_name);
 	if (!fp) return 0;
-	int ret = load_All_reads_fp(r, fp, NULL);
+	uint32_t crc = 0;
+	int ret = load_All_reads_fp(r, fp, &crc);
+	if (ret) {
+		uint64_t footer[2];
+		if (fread(footer, sizeof(footer), 1, fp) != 1 ||
+			(uint32_t)footer[0] != crc || footer[1] != HA_CKPT_FIN_MAGIC) {
+			fprintf(stderr, "[WARN] %s.bin: bad crc footer, cache ignored.\n", read_file_name);
+			ret = 0;
+		}
+	}
     fclose(fp);
-    fprintf(stderr, "Reads has been loaded.\n");
+    if (ret) fprintf(stderr, "Reads has been loaded.\n");
 
 	return ret;
 }
 
-void read_ma(ma_hit_t* x, FILE* fp)
+void read_ma(ma_hit_t* x, FILE* fp, uint32_t *crc)
 {
+#define RM_(f) do { f_flag += fread(&(f), sizeof(f), 1, fp); \
+    if (crc) *crc = crc32(*crc, (const Bytef*)&(f), (uInt)sizeof(f)); } while (0)
     int f_flag;
-    f_flag = fread(&(x->qns), sizeof(x->qns), 1, fp);
-    f_flag += fread(&(x->qe), sizeof(x->qe), 1, fp);
-    f_flag += fread(&(x->tn), sizeof(x->tn), 1, fp);
-    f_flag += fread(&(x->ts), sizeof(x->ts), 1, fp);
-    f_flag += fread(&(x->te), sizeof(x->te), 1, fp);
-    f_flag += fread(&(x->el), sizeof(x->el), 1, fp);
-    f_flag += fread(&(x->no_l_indel), sizeof(x->no_l_indel), 1, fp);
+    RM_(x->qns); RM_(x->qe); RM_(x->tn); RM_(x->ts); RM_(x->te);
+    RM_(x->el); RM_(x->no_l_indel);
 
     uint32_t t;
-    f_flag += fread(&(t), sizeof(t), 1, fp);
-    x->ml = t;
-
-    f_flag += fread(&(t), sizeof(t), 1, fp);
-    x->rev = t;
-    
-    f_flag += fread(&(t), sizeof(t), 1, fp);
-    x->bl = t;
-
-    f_flag += fread(&(t), sizeof(t), 1, fp);
-    x->del = t;
+    RM_(t); x->ml = t;
+    RM_(t); x->rev = t;
+    RM_(t); x->bl = t;
+    RM_(t); x->del = t;
+#undef RM_
 }
 
 
@@ -417,7 +445,7 @@ int append_All_reads(All_reads* r, char *idx, uint32_t id)
         f_flag += fread(&(r->paf[i].length), sizeof(r->paf[i].length), 1, fpo);
 
         if(r->paf[i].length == 0) continue;
-        for (k = 0; k < r->paf[i].length; k++) read_ma(&t, fpo);
+        for (k = 0; k < r->paf[i].length; k++) read_ma(&t, fpo, NULL);
 		r->paf[i].length = 0;
 	}
 

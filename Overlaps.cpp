@@ -23343,39 +23343,58 @@ int load_ma_hit_ts(ma_hit_t_alloc** x, char* read_file_name)
     long long n_read;
     long long i, k;
     int f_flag;
+    uint32_t crc = 0;
     f_flag = fread(&n_read, sizeof(n_read), 1, fp);
+    crc = crc32(crc, (const Bytef*)&n_read, (uInt)sizeof(n_read));
     uint64_t fsz = 0;
     { struct stat st; if (fstat(fileno(fp), &st) == 0) fsz = (uint64_t)st.st_size; }
     /* each entry costs >=4B on disk; reject impossible counts before malloc */
     if (f_flag != 1 || n_read <= 0 || (fsz && n_read > (long long)(fsz/4))) { fclose(fp); free(index_name); return 0; }
-    (*x) = (ma_hit_t_alloc*)malloc(sizeof(ma_hit_t_alloc)*n_read);
+    (*x) = (ma_hit_t_alloc*)calloc(n_read, sizeof(ma_hit_t_alloc));
+    if (!(*x)) { fclose(fp); free(index_name); return 0; }
 
 
     for (i = 0; i < n_read; i++)
     {        
         f_flag += fread(&((*x)[i].is_fully_corrected), sizeof((*x)[i].is_fully_corrected), 1, fp);
+        crc = crc32(crc, (const Bytef*)&(*x)[i].is_fully_corrected, (uInt)sizeof((*x)[i].is_fully_corrected));
         f_flag += fread(&((*x)[i].is_abnormal), sizeof((*x)[i].is_abnormal), 1, fp);
+        crc = crc32(crc, (const Bytef*)&(*x)[i].is_abnormal, (uInt)sizeof((*x)[i].is_abnormal));
         f_flag += fread(&((*x)[i].length), sizeof((*x)[i].length), 1, fp);
+        crc = crc32(crc, (const Bytef*)&(*x)[i].length, (uInt)sizeof((*x)[i].length));
         (*x)[i].size = (*x)[i].length;
 
         (*x)[i].buffer = NULL;
         if((*x)[i].length == 0) continue;
         /* a stored buffer can't exceed the file it lives in */
-        if (fsz && (*x)[i].length > fsz/sizeof(ma_hit_t)) { fclose(fp); free(index_name); return 0; }
+        if (fsz && (*x)[i].length > fsz/sizeof(ma_hit_t)) goto bad;
         (*x)[i].buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*(*x)[i].length);
 
         for (k = 0; k < (*x)[i].length; k++)
         {
-            read_ma(&((*x)[i].buffer[k]), fp);
+            read_ma(&((*x)[i].buffer[k]), fp, &crc);
         }  
         // fread((*x)[i].buffer, sizeof((*((*x)[i].buffer))), (*x)[i].length, fp);
     }
+
+    uint64_t footer[2];
+    if (fread(footer, sizeof(footer), 1, fp) != 1 ||
+        (uint32_t)footer[0] != crc || footer[1] != HA_CKPT_FIN_MAGIC) goto bad;
 
     free(index_name);    
     fclose(fp);
     fprintf(stderr, "ma_hit_ts has been read.\n");
 
     return 1;
+
+bad:
+    /* release everything this load touched; the array is calloc'd so
+     * unfilled buffer slots are NULL */
+    for (i = 0; i < n_read; ++i) free((*x)[i].buffer);
+    free(*x); *x = NULL;
+    fclose(fp); free(index_name);
+    fprintf(stderr, "[WARN] ma_hit_ts cache corrupt or truncated, ignored.\n");
+    return 0;
 }
 
 
@@ -23395,7 +23414,11 @@ int load_debug_ma_hit_ts(ma_hit_t_alloc** x, char* read_file_name)
     long long i/**, k**/;
     int f_flag;
     f_flag = fread(&n_read, sizeof(n_read), 1, fp);
-    (*x) = (ma_hit_t_alloc*)malloc(sizeof(ma_hit_t_alloc)*n_read);
+    uint64_t fsz = 0;
+    { struct stat st; if (fstat(fileno(fp), &st) == 0) fsz = (uint64_t)st.st_size; }
+    if (f_flag != 1 || n_read <= 0 || (fsz && n_read > (long long)(fsz/4))) { fclose(fp); free(index_name); return 0; }
+    (*x) = (ma_hit_t_alloc*)calloc(n_read, sizeof(ma_hit_t_alloc));
+    if (!(*x)) { fclose(fp); free(index_name); return 0; }
 
 
     for (i = 0; i < n_read; i++)
@@ -23407,7 +23430,8 @@ int load_debug_ma_hit_ts(ma_hit_t_alloc** x, char* read_file_name)
 
         (*x)[i].buffer = NULL;
         if((*x)[i].length == 0) continue;
-        
+        if (fsz && (*x)[i].length > fsz/sizeof(ma_hit_t)) goto bad;
+
         (*x)[i].buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*(*x)[i].length);
 
         // for (k = 0; k < (*x)[i].length; k++)
@@ -23422,28 +23446,29 @@ int load_debug_ma_hit_ts(ma_hit_t_alloc** x, char* read_file_name)
     fprintf(stderr, "ma_hit_ts has been read.\n");
 
     return 1;
+
+bad:
+    for (i = 0; i < n_read; ++i) free((*x)[i].buffer);
+    free(*x); *x = NULL;
+    fclose(fp); free(index_name);
+    fprintf(stderr, "[WARN] ma_hit_ts debug cache corrupt, ignored.\n");
+    return 0;
 }
 
 
-void write_ma(ma_hit_t* x, FILE* fp)
+void write_ma(ma_hit_t* x, FILE* fp, uint32_t *crc)
 {
-    fwrite(&(x->qns), sizeof(x->qns), 1, fp);
-    fwrite(&(x->qe), sizeof(x->qe), 1, fp);
-    fwrite(&(x->tn), sizeof(x->tn), 1, fp);
-    fwrite(&(x->ts), sizeof(x->ts), 1, fp);
-    fwrite(&(x->te), sizeof(x->te), 1, fp);
-    fwrite(&(x->el), sizeof(x->el), 1, fp);
-    fwrite(&(x->no_l_indel), sizeof(x->no_l_indel), 1, fp);
+#define WM_(f) do { fwrite(&(f), sizeof(f), 1, fp); \
+	if (crc) *crc = crc32(*crc, (const Bytef*)&(f), (uInt)sizeof(f)); } while (0)
+    WM_(x->qns); WM_(x->qe); WM_(x->tn); WM_(x->ts); WM_(x->te);
+    WM_(x->el); WM_(x->no_l_indel);
 
     uint32_t t = x->ml;
-    fwrite(&(t), sizeof(t), 1, fp);
-    t = x->rev;
-    fwrite(&(t), sizeof(t), 1, fp);
-
-    t = x->bl;
-    fwrite(&(t), sizeof(t), 1, fp);
-    t =x->del;
-    fwrite(&(t), sizeof(t), 1, fp);
+    WM_(t); t = x->rev;
+    WM_(t); t = x->bl;
+    WM_(t); t = x->del;
+    WM_(t);
+#undef WM_
 }
 
 
@@ -23457,21 +23482,27 @@ void write_ma_hit_ts(ma_hit_t_alloc* x, long long n_read, char* read_file_name)
     FILE* fp = fopen(tmp_name, "w");
     if (!fp) { free(index_name); free(tmp_name); fprintf(stderr, "ma_hit_ts write failed.\n"); return; }
     long long i, k;
-    fwrite(&n_read, sizeof(n_read), 1, fp);
+    uint32_t crc = 0;
+#define WMC_(f) do { fwrite(&(f), sizeof(f), 1, fp); \
+	crc = crc32(crc, (const Bytef*)&(f), (uInt)sizeof(f)); } while (0)
+    WMC_(n_read);
 
 
     for (i = 0; i < n_read; i++)
     {
-        fwrite(&(x[i].is_fully_corrected), sizeof(x[i].is_fully_corrected), 1, fp);
-        fwrite(&(x[i].is_abnormal), sizeof(x[i].is_abnormal), 1, fp);
-        fwrite(&(x[i].length), sizeof(x[i].length), 1, fp);
+        WMC_(x[i].is_fully_corrected);
+        WMC_(x[i].is_abnormal);
+        WMC_(x[i].length);
         for (k = 0; k < x[i].length; k++)
         {
-            write_ma(x[i].buffer + k, fp);
+            write_ma(x[i].buffer + k, fp, &crc);
         }  
         // fwrite(x[i].buffer, sizeof((*(x[i].buffer))), x[i].length, fp);
     }
+#undef WMC_
 
+    uint64_t footer[2] = {crc, HA_CKPT_FIN_MAGIC};
+    fwrite(footer, sizeof(footer), 1, fp);
 
     int bad = ferror(fp);
     if (fflush(fp) != 0) bad = 1;
@@ -23618,6 +23649,9 @@ int load_all_data_from_disk(ma_hit_t_alloc **sources, ma_hit_t_alloc **reverse_s
 
 	sprintf(gfa_name, "%s.ec", output_file_name);
 	if (!load_All_reads(&R_INF, gfa_name)) {
+		/* a failed load may leave R_INF partly populated; a non-zero
+		   total_reads would make ha_pt_gen skip parsing the real input */
+		reset_All_reads(&R_INF);
 		free(gfa_name);
 		return 0;
 	}
@@ -23640,11 +23674,13 @@ int load_all_data_from_disk(ma_hit_t_alloc **sources, ma_hit_t_alloc **reverse_s
 
 	sprintf(gfa_name, "%s.ovlp.source", output_file_name);
 	if (!load_ma_hit_ts(sources, gfa_name)) {
+		reset_All_reads(&R_INF);
 		free(gfa_name);
 		return 0;
 	}
 	sprintf(gfa_name, "%s.ovlp.reverse", output_file_name);
 	if (!load_ma_hit_ts(reverse_sources, gfa_name)) {
+		reset_All_reads(&R_INF);
 		free(gfa_name);
 		return 0;
 	}

@@ -1895,10 +1895,10 @@ void hap_recalculate_peaks(char* output_file_name)
         ha_flt_tab = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, 0, 0);
         ha_opt_update_cov(&asm_opt, hom_cov);
     }
-    free(R_INF.read_length);
-    free(R_INF.name_index);
+    free(R_INF.read_length); R_INF.read_length = NULL;
+    free(R_INF.name_index); R_INF.name_index = NULL;
 
-    load_All_reads(&R_INF, gfa_name);
+    if (!load_All_reads(&R_INF, gfa_name)) { reset_All_reads(&R_INF); free(gfa_name); return; }
 
     ha_idx = ha_pt_gen(&asm_opt, ha_flt_tab, 1, 0, &R_INF, &hom_cov, &het_cov); // build the index
     asm_opt.hom_cov = hom_cov;

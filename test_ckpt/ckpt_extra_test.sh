@@ -518,6 +518,77 @@ else echo "OK AH(输入集变更被拒)"; fi
 rm -f mi_a.fa mi_b.fa
 fi
 
+if want AI; then
+echo "===== [AI] .ovlp.source.bin 中段损坏 -> CRC拒+重算 ====="
+rm -f ai.*
+$HIFIASM -o ai -t$T "$READS" 2>ai_a.log
+SZ=$(fsz ai.ovlp.source.bin); OFF=$((SZ/2))
+printf '\xFF' | dd of=ai.ovlp.source.bin bs=1 seek=$OFF conv=notrunc 2>/dev/null
+$HIFIASM -o ai -t$T "$READS" 2>ai_b.log
+if grep -qE 'loaded corrected reads' ai_b.log; then
+    echo "FAIL AI(损坏的 ovlp.source 被接受)"; fail=1
+elif grep -qE 'corrupt|bad crc' ai_b.log; then
+    echo "OK AI(损坏被拒并重算)"
+else echo "FAIL AI(未见预期拒绝)"; fail=1; fi
+cmp_gfa bb ai AI
+fi
+
+if want AJ; then
+echo "===== [AJ] .ec.bin 中段损坏 -> footer CRC拒+重算 ====="
+rm -f aj.*
+$HIFIASM -o aj -t$T "$READS" 2>aj_a.log
+SZ=$(fsz aj.ec.bin); OFF=$((SZ*2/3))
+printf '\xAA' | dd of=aj.ec.bin bs=1 seek=$OFF conv=notrunc 2>/dev/null
+$HIFIASM -o aj -t$T "$READS" 2>aj_b.log
+if grep -qE 'loaded corrected reads' aj_b.log; then
+    echo "FAIL AJ(损坏的 .ec.bin 被接受)"; fail=1
+elif grep -qE 'bad crc|corrupt' aj_b.log; then
+    echo "OK AJ(.ec.bin 损坏被拒并重算)"
+else echo "FAIL AJ(未见预期拒绝)"; fail=1; fi
+cmp_gfa bb aj AJ
+fi
+
+if want AK; then
+echo "===== [AK] 部分缓存: 只有 .ec.bin -> R_INF 归零重算 ====="
+rm -f ak.*
+$HIFIASM -o ak -t$T "$READS" 2>ak_a.log
+rm -f ak.ovlp.source.bin ak.ovlp.reverse.bin   # 只留 .ec + params
+$HIFIASM -o ak -t$T "$READS" 2>ak_b.log
+if grep -qE 'loaded corrected reads' ak_b.log; then
+    echo "FAIL AK(半个缓存被当成完整缓存)"; fail=1
+elif grep -qE 'Reads has been loaded' ak_b.log; then
+    echo "OK AK(.ec 加载后 ovlp 缺失, 归零重算)"
+else echo "FAIL AK(未见预期路径)"; fail=1; fi
+cmp_gfa bb ak AK
+fi
+
+if want AL; then
+echo "===== [AL] .ec.bin 截尾 -> 提前 fread 失败 -> 归零重算 ====="
+rm -f al.*
+$HIFIASM -o al -t$T "$READS" 2>al_a.log
+SZ=$(fsz al.ec.bin); TR=$((SZ*3/4))
+if ! truncate -s $TR al.ec.bin 2>/dev/null; then
+    dd if=al.ec.bin of=al.ec.bin.tr bs=$TR count=1 2>/dev/null && mv al.ec.bin.tr al.ec.bin
+fi
+$HIFIASM -o al -t$T "$READS" 2>al_b.log
+if grep -qE 'loaded corrected reads' al_b.log; then
+    echo "FAIL AL(截断的 .ec.bin 被接受)"; fail=1
+else echo "OK AL(截断被拒并重算)"; fi
+cmp_gfa bb al AL
+fi
+
+if want AM; then
+echo "===== [AM] 部分缓存: 只有 .ovlp.* -> 无 .ec 重算 ====="
+rm -f am.*
+$HIFIASM -o am -t$T "$READS" 2>am_a.log
+rm -f am.ec.bin
+$HIFIASM -o am -t$T "$READS" 2>am_b.log
+if grep -qE 'loaded corrected reads' am_b.log; then
+    echo "FAIL AM(无 .ec 却走了缓存)"; fail=1
+else echo "OK AM(缺 .ec 正常重算)"; fi
+cmp_gfa bb am AM
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
