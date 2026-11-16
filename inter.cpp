@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <zlib.h>
 #include <math.h>
+#include <unistd.h>
 #include "kseq.h" // FASTA/Q parser
 #include "kavl.h"
 #include "khash.h"
@@ -18,6 +19,7 @@
 #include "Assembly.h"
 #include "hic.h"
 #include "gfa_ut.h"
+#include "ckpt.h"
 KSEQ_INIT(gzFile, gzread)
 
 #define oreg_xe_lt(a, b) (((uint64_t)(a).x_pos_e<<32|(a).x_pos_s) < ((uint64_t)(b).x_pos_e<<32|(b).x_pos_s))
@@ -20116,9 +20118,10 @@ void print_gaf(const ma_ug_t *ug, mg_gres_a *hits, mg_dbn_t *name)
 
 void write_ul_hits(mg_gres_a *hits, mg_dbn_t *nn, const char *fn)
 {
-	char *buf = (char*)calloc(strlen(fn) + 25, 1);
-    sprintf(buf, "%s.ul.aln.bin", fn);
+	char *buf = (char*)calloc(strlen(fn) + 64, 1);
+    sprintf(buf, "%s.ul.aln.bin.tmp", fn);
     FILE* fp = fopen(buf, "w");
+	if(!fp) { free(buf); return; }
 	uint32_t i;
 
     fwrite(&hits->n, sizeof(hits->n), 1, fp);
@@ -20141,7 +20144,13 @@ void write_ul_hits(mg_gres_a *hits, mg_dbn_t *nn, const char *fn)
 	fwrite(nn->cc.a, sizeof(char), nn->cc.n, fp);
     // write_dbug(ug, fp);
 
-    fclose(fp);
+	{ char *final_name = (char*)calloc(strlen(fn) + 64, 1);
+	  sprintf(final_name, "%s.ul.aln.bin", fn);
+	  fflush(fp); fsync(fileno(fp)); fclose(fp);
+	  if(!ha_bin_commit_crc(buf, final_name)) {
+	      fprintf(stderr, "[WARN] %s: commit failed, index not saved.\n", final_name);
+	  }
+	  free(final_name); }
 	fprintf(stderr, "[M::%s::] ==> UL alignments have been written\n", __func__);
     free(buf);
 }
@@ -20149,7 +20158,7 @@ void write_ul_hits(mg_gres_a *hits, mg_dbn_t *nn, const char *fn)
 int load_ul_hits(mg_gres_a *hits, mg_dbn_t *nn, const char *fn)
 {
     uint64_t flag = 0;
-    char *buf = (char*)calloc(strlen(fn) + 25, 1);
+    char *buf = (char*)calloc(strlen(fn) + 64, 1);
     sprintf(buf, "%s.ul.aln.bin", fn);
 
     FILE* fp = NULL; 
@@ -20158,6 +20167,11 @@ int load_ul_hits(mg_gres_a *hits, mg_dbn_t *nn, const char *fn)
         free(buf);
         return 0;
     }
+	if(!ha_bin_verify_crc(fp)) {
+		fprintf(stderr, "[WARN] %s.ul.aln.bin: bad crc footer, index ignored.\n", fn);
+		fclose(fp); free(buf);
+		return 0;
+	}
     uint32_t i;
 
     kv_init(*hits);
@@ -21491,6 +21505,11 @@ int32_t load_emask_t(idx_emask_t **z, char* file_name, ma_ug_t *ug)
     sprintf(gfa_name, "%s.ul.msk.bin", file_name);
     FILE* fp = fopen(gfa_name, "r"); free(gfa_name);
     if (!fp) return 0;
+    if(!ha_bin_verify_crc(fp)) {
+        fprintf(stderr, "[WARN] %s.ul.msk.bin: bad crc footer, index ignored.\n", file_name);
+        fclose(fp);
+        return 0;
+    }
     if(ug && (!test_dbug(ug, fp))) {
         fprintf(stderr, "[M::%s] Renew UL Index\n", __func__);
         fclose(fp);
@@ -21514,10 +21533,10 @@ int32_t load_emask_t(idx_emask_t **z, char* file_name, ma_ug_t *ug)
 
 int32_t write_emask_t(idx_emask_t *x, char* file_name, ma_ug_t *ug)
 {
-	char* gfa_name = NULL; MALLOC(gfa_name, strlen(file_name)+50);
-    sprintf(gfa_name, "%s.ul.msk.bin", file_name);
-    FILE* fp = fopen(gfa_name, "w"); free(gfa_name);
-    if (!fp) return 0;
+	char* gfa_name = NULL; MALLOC(gfa_name, strlen(file_name)+64);
+    sprintf(gfa_name, "%s.ul.msk.bin.tmp", file_name);
+    FILE* fp = fopen(gfa_name, "w");
+    if (!fp) { free(gfa_name); return 0; }
     uint64_t k; kv_emask_t *p = NULL;
 
     if(ug) write_dbug(ug, fp);
@@ -21530,7 +21549,14 @@ int32_t write_emask_t(idx_emask_t *x, char* file_name, ma_ug_t *ug)
 	}
 
     fprintf(stderr, "[M::%s] Index has been written.\n", __func__);
-    fclose(fp);
+	{ char *final_name = NULL; MALLOC(final_name, strlen(file_name)+64);
+	  sprintf(final_name, "%s.ul.msk.bin", file_name);
+	  fflush(fp); fsync(fileno(fp)); fclose(fp);
+	  if (!ha_bin_commit_crc(gfa_name, final_name)) {
+	      fprintf(stderr, "[WARN] %s: commit failed, index not saved.\n", final_name);
+	  }
+	  free(final_name); }
+	free(gfa_name);
     return 1;
 }
 
@@ -21598,10 +21624,10 @@ void init_uldat_t(uldat_t *sl, void *ha_flt_tab, void *ha_idx, mg_idxopt_t *opt,
 
 int32_t write_all_ul_t(all_ul_t *x, char* file_name, ma_ug_t *ug)
 {
-	char* gfa_name = NULL; MALLOC(gfa_name, strlen(file_name)+50);
-	sprintf(gfa_name, "%s.ul.ovlp.bin", file_name);
-	FILE* fp = fopen(gfa_name, "w"); free(gfa_name);
-	if (!fp) return 0;
+	char* gfa_name = NULL; MALLOC(gfa_name, strlen(file_name)+64);
+	sprintf(gfa_name, "%s.ul.ovlp.bin.tmp", file_name);
+	FILE* fp = fopen(gfa_name, "w");
+	if (!fp) { free(gfa_name); return 0; }
 	uint64_t k; ul_vec_t *p = NULL;
 
 	if(ug) write_dbug(ug, fp);
@@ -21635,7 +21661,14 @@ int32_t write_all_ul_t(all_ul_t *x, char* file_name, ma_ug_t *ug)
 	}
 
 	fprintf(stderr, "[M::%s] Index has been written.\n", __func__);
-	fclose(fp);
+	{ char *final_name = NULL; MALLOC(final_name, strlen(file_name)+64);
+	  sprintf(final_name, "%s.ul.ovlp.bin", file_name);
+	  fflush(fp); fsync(fileno(fp)); fclose(fp);
+	  if (!ha_bin_commit_crc(gfa_name, final_name)) {
+	      fprintf(stderr, "[WARN] %s: commit failed, index not saved.\n", final_name);
+	  }
+	  free(final_name); }
+	free(gfa_name);
 	if(asm_opt.bin_only) exit(0);
 	return 1;
 }
@@ -21647,6 +21680,11 @@ int32_t load_all_ul_t(all_ul_t *x, char* file_name, All_reads *hR, ma_ug_t *ug)
 	sprintf(gfa_name, "%s.ul.ovlp.bin", file_name);
 	FILE* fp = fopen(gfa_name, "r"); free(gfa_name);
 	if (!fp) return 0;
+	if(!ha_bin_verify_crc(fp)) {
+		fprintf(stderr, "[WARN] %s.ul.ovlp.bin: bad crc footer, index ignored.\n", file_name);
+		fclose(fp);
+		return 0;
+	}
 	if(ug && (!test_dbug(ug, fp))) {
 		fprintf(stderr, "[M::%s] Renew UL Index\n", __func__);
 		fclose(fp);

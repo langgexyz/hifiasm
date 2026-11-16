@@ -879,7 +879,11 @@ void ha_ckpt_purge(void)
 		snprintf(b, sizeof(b), "%s.ovlp.reverse.bin.tmp", asm_opt.output_file_name); unlink(b);
 		snprintf(b, sizeof(b), "%s.pt_flt.tmp", asm_opt.output_file_name); unlink(b);
 		snprintf(b, sizeof(b), "%s.pt_flt.paf.bin.tmp", asm_opt.output_file_name); unlink(b);
-		snprintf(b, sizeof(b), "%s.ct_flt.tmp", asm_opt.output_file_name); unlink(b); }
+		snprintf(b, sizeof(b), "%s.ct_flt.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.ul.ovlp.bin.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.ul.msk.bin.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.ul.aln.bin.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.uidx.bin.tmp", asm_opt.output_file_name); unlink(b); }
 }
 
 /************************** file-level crc footer **************************/

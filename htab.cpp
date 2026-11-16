@@ -1644,8 +1644,8 @@ int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_op
 
 int uidx_write(void *flt_tab, ha_pt_t *ha_idx, char* file_name, ma_ug_t *ug)
 {
-	char* gfa_name = (char*)malloc(strlen(file_name)+25);
-    sprintf(gfa_name, "%s.uidx.bin", file_name);
+	char* gfa_name = (char*)malloc(strlen(file_name)+64);
+    sprintf(gfa_name, "%s.uidx.bin.tmp", file_name);
     FILE* fp = fopen(gfa_name, "w");
     if (!fp) {
         free(gfa_name);
@@ -1681,8 +1681,14 @@ int uidx_write(void *flt_tab, ha_pt_t *ha_idx, char* file_name, ma_ug_t *ug)
         }
     }
 	fprintf(stderr, "[M::%s] Index has been written.\n", __func__);
+	{ char *final_name = (char*)malloc(strlen(file_name)+64);
+	  sprintf(final_name, "%s.uidx.bin", file_name);
+	  fflush(fp); fsync(fileno(fp)); fclose(fp);
+	  if (!ha_bin_commit_crc(gfa_name, final_name)) {
+	      fprintf(stderr, "[WARN] %s: commit failed, index not saved.\n", final_name);
+	  }
+	  free(final_name); }
     free(gfa_name);
-    fclose(fp);
     return 1;
 }
 
@@ -1697,6 +1703,11 @@ int uidx_load(void **r_flt_tab, ha_pt_t **r_ha_idx, char* file_name, ma_ug_t *ug
         return 0;
     }
 
+    if(!ha_bin_verify_crc(fp)) {
+        fprintf(stderr, "[WARN] %s.uidx.bin: bad crc footer, index ignored.\n", file_name);
+        free(gfa_name); fclose(fp);
+        return 0;
+    }
 	if(ug && (!test_dbug(ug, fp))) {
         fprintf(stderr, "[M::%s] Renew UL Index\n", __func__);
         free(gfa_name); fclose(fp);
