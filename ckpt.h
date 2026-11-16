@@ -76,4 +76,11 @@ int ckpt_ft_load(void **flt_tab, FILE *fp);
 void write_All_reads_fp(All_reads *r, FILE *fp, uint32_t *crc);
 int load_All_reads_fp(All_reads *r, FILE *fp, uint32_t *crc);
 
+/* generic binary-file integrity: append crc|FIN_MAGIC to a fully-written
+ * tmp file and atomically rename it into place; the load side verifies the
+ * footer before parsing. used for index formats whose bytes are produced
+ * by nested serializers (yak_*) where inline crc isn't reachable. */
+int ha_bin_commit_crc(const char *tmp_name, const char *final_name);
+int ha_bin_verify_crc(FILE *fp);   /* on success leaves fp rewound */
+
 #endif

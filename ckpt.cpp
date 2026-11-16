@@ -876,5 +876,54 @@ void ha_ckpt_purge(void)
 	{	char b[4096];
 		snprintf(b, sizeof(b), "%s.ec.bin.tmp", asm_opt.output_file_name); unlink(b);
 		snprintf(b, sizeof(b), "%s.ovlp.source.bin.tmp", asm_opt.output_file_name); unlink(b);
-		snprintf(b, sizeof(b), "%s.ovlp.reverse.bin.tmp", asm_opt.output_file_name); unlink(b); }
+		snprintf(b, sizeof(b), "%s.ovlp.reverse.bin.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.pt_flt.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.pt_flt.paf.bin.tmp", asm_opt.output_file_name); unlink(b);
+		snprintf(b, sizeof(b), "%s.ct_flt.tmp", asm_opt.output_file_name); unlink(b); }
+}
+
+/************************** file-level crc footer **************************/
+
+/* compute crc32 over a fully-written tmp file, append crc|FIN_MAGIC and
+ * atomically rename it into place. returns 1 on success. */
+int ha_bin_commit_crc(const char *tmp_name, const char *final_name)
+{
+	uint32_t crc = 0; size_t n; uint8_t buf[1<<20];
+	FILE *fp = fopen(tmp_name, "rb");
+	if (!fp) return 0;
+	while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
+		crc = crc32(crc, buf, (uInt)n);
+	fclose(fp);
+	fp = fopen(tmp_name, "ab");
+	if (!fp) { unlink(tmp_name); return 0; }
+	uint64_t footer[2] = {crc, HA_CKPT_FIN_MAGIC};
+	fwrite(footer, sizeof(footer), 1, fp);
+	int bad = ferror(fp);
+	if (fflush(fp) != 0) bad = 1;
+	if (fsync(fileno(fp)) != 0) bad = 1;
+	if (fclose(fp) != 0) bad = 1;
+	if (bad || rename(tmp_name, final_name) != 0) { unlink(tmp_name); return 0; }
+	return 1;
+}
+
+/* verify the trailing crc|FIN_MAGIC of a file; on success the stream is
+ * rewound so the caller can parse normally. returns 0 on any mismatch. */
+int ha_bin_verify_crc(FILE *fp)
+{
+	struct stat st;
+	if (fstat(fileno(fp), &st) != 0 || st.st_size < (off_t)sizeof(uint64_t)*2) return 0;
+	uint64_t fsz = (uint64_t)st.st_size, footer[2];
+	if (fseek(fp, (long)fsz - 16, SEEK_SET) != 0) return 0;
+	if (fread(footer, sizeof(footer), 1, fp) != 1) return 0;
+	if (footer[1] != HA_CKPT_FIN_MAGIC) return 0;
+	if (fseek(fp, 0, SEEK_SET) != 0) return 0;
+	uint32_t crc = 0; uint64_t remain = fsz - 16; uint8_t buf[1<<20];
+	while (remain) {
+		uint64_t want = remain < sizeof(buf) ? remain : sizeof(buf);
+		size_t n = fread(buf, 1, (size_t)want, fp);
+		if (!n) return 0;
+		crc = crc32(crc, buf, (uInt)n); remain -= n;
+	}
+	if ((uint32_t)footer[0] != crc) return 0;
+	return fseek(fp, 0, SEEK_SET) == 0;
 }

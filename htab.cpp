@@ -10,6 +10,7 @@
 #include "ksort.h"
 #include "htab.h"
 #include "Process_Read.h"
+#include "ckpt.h"
 
 #define YAK_COUNTER_BITS 12
 #define YAK_N_COUNTS     (1<<YAK_COUNTER_BITS)
@@ -1341,9 +1342,11 @@ int write_ct_index(void *i_ct_idx, char* file_name)
 {
 	char* gfa_name = (char*)malloc(strlen(file_name)+25);
     sprintf(gfa_name, "%s.ct_flt", file_name);
-    FILE* fp = fopen(gfa_name, "w");
+    char* tmp_name = (char*)malloc(strlen(gfa_name)+8);
+    sprintf(tmp_name, "%s.tmp", gfa_name);
+    FILE* fp = fopen(tmp_name, "w");
 	if (!fp) {
-		free(gfa_name);
+		free(gfa_name); free(tmp_name);
         return 0;
     }
 	ha_ct_t* ct_idx = (ha_ct_t*)i_ct_idx;
@@ -1361,9 +1364,12 @@ int write_ct_index(void *i_ct_idx, char* file_name)
 	}
 
 
+	int bad = ferror(fp); fclose(fp);
+	if (bad || !ha_bin_commit_crc(tmp_name, gfa_name)) {
+		unlink(tmp_name); free(gfa_name); free(tmp_name); return 0;
+	}
 	fprintf(stderr, "[M::%s] Index has been written.\n", __func__);
-    free(gfa_name);
-	fclose(fp);
+    free(gfa_name); free(tmp_name);
 	return 1;
 }
 
@@ -1376,6 +1382,10 @@ int load_ct_index(void **i_ct_idx, char* file_name)
 		free(gfa_name);
         return 0;
     }
+	if (!ha_bin_verify_crc(fp)) {
+		fprintf(stderr, "[WARN] %s: bad crc footer, index ignored.\n", gfa_name);
+		fclose(fp); free(gfa_name); return 0;
+	}
 	ha_ct_t** ct_idx = (ha_ct_t**)i_ct_idx;
 	double index_time = 0;
 	uint64_t flag = 0;
@@ -1413,9 +1423,11 @@ int write_pt_index(void *flt_tab, ha_pt_t *ha_idx, All_reads* r, hifiasm_opt_t* 
 {
     char* gfa_name = (char*)malloc(strlen(file_name)+64);
     sprintf(gfa_name, "%s.pt_flt", file_name);
-    FILE* fp = fopen(gfa_name, "w");
+    char* tmp_name = (char*)malloc(strlen(file_name)+80);
+    sprintf(tmp_name, "%s.tmp", gfa_name);
+    FILE* fp = fopen(tmp_name, "w");
 	if (!fp) {
-		free(gfa_name);
+		free(gfa_name); free(tmp_name);
         return 0;
     }
 	yak_ft_t *ha_flt_tab = (yak_ft_t*)flt_tab;
@@ -1454,10 +1466,15 @@ int write_pt_index(void *flt_tab, ha_pt_t *ha_idx, All_reads* r, hifiasm_opt_t* 
 
 	write_All_reads(r, gfa_name);
 
-	sprintf(gfa_name, "%s.pt_flt.paf.bin", file_name); 
-	fclose(fp); fp = fopen(gfa_name, "w"); uint64_t k;
+	int bad = ferror(fp); fclose(fp);
+	if (bad || !ha_bin_commit_crc(tmp_name, gfa_name)) {
+		unlink(tmp_name); free(gfa_name); free(tmp_name); return 0;
+	}
+	sprintf(gfa_name, "%s.pt_flt.paf.bin", file_name);
+	sprintf(tmp_name, "%s.tmp", gfa_name);
+	fp = fopen(tmp_name, "w"); uint64_t k;
 	if (!fp) {
-		free(gfa_name);
+		free(gfa_name); free(tmp_name);
         return 0;
     }
 	fwrite(&(r->total_reads), sizeof(r->total_reads), 1, fp);
@@ -1468,9 +1485,12 @@ int write_pt_index(void *flt_tab, ha_pt_t *ha_idx, All_reads* r, hifiasm_opt_t* 
         fwrite(r->paf[k].buffer, sizeof((*(r->paf[k].buffer))), r->paf[k].length, fp);
 	}
 
+	bad = ferror(fp); fclose(fp);
+	if (bad || !ha_bin_commit_crc(tmp_name, gfa_name)) {
+		unlink(tmp_name); free(gfa_name); free(tmp_name); return 0;
+	}
 	fprintf(stderr, "[M::%s] Index has been written.\n", __func__);
-    free(gfa_name);
-	fclose(fp);
+    free(gfa_name); free(tmp_name);
 	return 1;
 }
 
@@ -1483,6 +1503,10 @@ int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_op
 		free(gfa_name);
         return 0;
     }
+	if (!ha_bin_verify_crc(fp)) {
+		fprintf(stderr, "[WARN] %s: bad crc footer, index ignored.\n", gfa_name);
+		fclose(fp); free(gfa_name); return 0;
+	}
 
 	ha_pt_t *ha_idx = NULL;
 	char mode = 0;
@@ -1575,6 +1599,10 @@ int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_op
         free(gfa_name);
         return 0;
     }
+	if (!ha_bin_verify_crc(fp)) {
+		fprintf(stderr, "[WARN] %s: bad crc footer, index ignored.\n", gfa_name);
+		fclose(fp); reset_All_reads(r); free(gfa_name); return 0;
+	}
 	uint64_t pf_sz = 0;
 	{ struct stat st; if (fstat(fileno(fp), &st) == 0) pf_sz = (uint64_t)st.st_size; }
 	f_flag += fread(&(r->total_reads), sizeof(r->total_reads), 1, fp);

@@ -589,6 +589,67 @@ else echo "OK AM(缺 .ec 正常重算)"; fi
 cmp_gfa bb am AM
 fi
 
+if want AN; then
+echo "===== [AN] 并发写缓存: 同 prefix 双进程 -> 第三跑必须 bit-exact ====="
+rm -f an.*
+# 两个进程同 prefix 同输入并发, .tmp 交错写, 后 rename 者赢
+$HIFIASM -o an -t2 "$READS" 2>an_a.log & PA=$!
+$HIFIASM -o an -t2 "$READS" 2>an_b.log & PB=$!
+wait $PA; wait $PB
+# 第三跑: 缓存要么有效要么被 CRC 拒, 输出都必须对
+$HIFIASM -o an -t$T "$READS" 2>an_c.log
+if grep -qE 'loaded corrected reads' an_c.log; then
+    echo "OK AN(并发后缓存完好命中)"
+elif grep -qE 'corrupt|bad crc|WARN' an_c.log; then
+    echo "OK AN(交错缓存被 CRC 拒并重算)"
+else
+    echo "FAIL AN(第三跑既未命中也未拒绝)"; fail=1
+fi
+cmp_gfa bb an AN
+fi
+
+if want AO; then
+echo "===== [AO] 缓存写入中 kill -> .tmp 忽略 + params 缺席 -> 重算 ====="
+rm -f ao.*
+# AO-a: 在 "Writing reads to disk" 出现瞬间杀 (.ec.bin.tmp 写一半)
+$HIFIASM -o ao -t$T "$READS" 2>ao_a.log & P=$!
+t=0
+while [ $t -lt 3600 ]; do
+    kill -0 $P 2>/dev/null || break
+    grep -q 'Writing reads to disk' ao_a.log 2>/dev/null && break
+    sleep 0.1; t=$((t+1))
+done
+kill -9 $P 2>/dev/null; wait $P 2>/dev/null; sleep 1
+TMPF=$(ls ao.*.tmp 2>/dev/null | head -1)
+echo "[AO-a] kill @ $(ls ao.*.tmp 2>/dev/null | tr '\n' ' ')"
+$HIFIASM -o ao -t$T "$READS" 2>ao_b.log
+if [ -n "$TMPF" ] && grep -qE 'loaded corrected reads' ao_b.log; then
+    echo "FAIL AO-a(半写缓存被接受)"; fail=1
+elif [ -z "$TMPF" ]; then
+    echo "OK AO-a(kill 未落在写窗口, 跑完即合法缓存)"
+else echo "OK AO-a(无 params 拒缓存重算)"; fi
+cmp_gfa bb ao AO-a
+# AO-b: 在 "Writing ma_hit_ts" 出现瞬间杀 (.ec 已提交, ovlp.tmp 写一半)
+rm -f ao.*
+$HIFIASM -o ao -t$T "$READS" 2>ao_c.log & P=$!
+t=0
+while [ $t -lt 3600 ]; do
+    kill -0 $P 2>/dev/null || break
+    grep -q 'ma_hit_ts to disk' ao_c.log 2>/dev/null && break
+    sleep 0.1; t=$((t+1))
+done
+kill -9 $P 2>/dev/null; wait $P 2>/dev/null; sleep 1
+TMPF=$(ls ao.*.tmp 2>/dev/null | head -1)
+echo "[AO-b] kill @ $(ls ao.*.tmp ao.ec.bin 2>/dev/null | tr '\n' ' ')"
+$HIFIASM -o ao -t$T "$READS" 2>ao_d.log
+if [ -n "$TMPF" ] && grep -qE 'loaded corrected reads' ao_d.log; then
+    echo "FAIL AO-b(半写状态被当成完整缓存)"; fail=1
+elif [ -z "$TMPF" ]; then
+    echo "OK AO-b(kill 未落在写窗口)"
+else echo "OK AO-b(.ec 已提交但无 params -> 归零重算)"; fi
+cmp_gfa bb ao AO-b
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail

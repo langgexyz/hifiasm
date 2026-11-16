@@ -366,6 +366,16 @@ int append_All_reads(All_reads* r, char *idx, uint32_t id)
 	f_flag += fread(&r->total_reads_bases, sizeof(r->total_reads_bases), 1, fp);
 	f_flag += fread(&r->total_name_length, sizeof(r->total_name_length), 1, fp);
 
+	/* sanity-bound the file-supplied delta counts before allocating:
+	   each read costs >=16 bytes on disk, each index slot is 8 */
+	uint64_t fsz = 0, fpo_sz = 0;
+	{ struct stat st; if (fstat(fileno(fp), &st) == 0) fsz = (uint64_t)st.st_size;
+	  if (fstat(fileno(fpo), &st) == 0) fpo_sz = (uint64_t)st.st_size; }
+	if (f_flag != 6 || (fsz && (r->total_reads > fsz/16 || r->name_index_size > fsz/8 ||
+		r->index_size > fsz/8 || r->total_name_length > fsz))) {
+		fclose(fp); fclose(fpo); return 0;
+	}
+
 	r->index_size += index_size0;
 	r->name_index_size += name_index_size0; if(name_index_size0) r->name_index_size--;
 	r->total_reads += total_reads0;
@@ -380,6 +390,7 @@ int append_All_reads(All_reads* r, char *idx, uint32_t id)
 		f_flag += fread(&zero, sizeof(zero), 1, fp);
 
 		if (zero) {
+			if (fsz && zero > fsz/8) { fclose(fp); fclose(fpo); return 0; }
 			r->N_site[i] = (uint64_t*)malloc(sizeof(uint64_t)*(zero + 1));
 			r->N_site[i][0] = zero;
 			if (r->N_site[i][0]) {
@@ -398,6 +409,7 @@ int append_All_reads(All_reads* r, char *idx, uint32_t id)
 
 	REALLOC(r->read_sperate, r->total_reads);
 	for (i = total_reads0; i < r->total_reads; i++) {
+		if (fsz && r->read_length[i]/4+1 > fsz) { fclose(fp); fclose(fpo); return 0; }
 		r->read_sperate[i] = (uint8_t*)malloc(sizeof(uint8_t)*(r->read_length[i]/4+1));
 		f_flag += fread(r->read_sperate[i], sizeof(uint8_t), r->read_length[i]/4+1, fp);
 	}
@@ -439,12 +451,14 @@ int append_All_reads(All_reads* r, char *idx, uint32_t id)
 	REALLOC(r->paf, r->total_reads);
 	memset(r->paf+total_reads0, 0, sizeof((*(r->paf)))*(r->total_reads - total_reads0));
 	long long n_read; f_flag = fread(&n_read, sizeof(n_read), 1, fpo); ma_hit_t t;
+	if (f_flag != 1 || n_read <= 0 || (fpo_sz && n_read > (long long)(fpo_sz/4))) { fclose(fp); fclose(fpo); return 0; }
 	for (i = total_reads0; i < r->total_reads; i++) {
 		f_flag += fread(&(r->paf[i].is_fully_corrected), sizeof(r->paf[i].is_fully_corrected), 1, fpo);
         f_flag += fread(&(r->paf[i].is_abnormal), sizeof(r->paf[i].is_abnormal), 1, fpo);
         f_flag += fread(&(r->paf[i].length), sizeof(r->paf[i].length), 1, fpo);
 
         if(r->paf[i].length == 0) continue;
+        if (fpo_sz && r->paf[i].length > fpo_sz/sizeof(ma_hit_t)) { fclose(fp); fclose(fpo); return 0; }
         for (k = 0; k < r->paf[i].length; k++) read_ma(&t, fpo, NULL);
 		r->paf[i].length = 0;
 	}
