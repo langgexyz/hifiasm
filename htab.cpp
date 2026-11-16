@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <sys/stat.h>
 #include "kthread.h"
 #include "khashl.h"
 #include "kseq.h"
@@ -1388,6 +1389,9 @@ int load_ct_index(void **i_ct_idx, char* file_name)
 	flag += fread(&h->n_hash, sizeof(h->n_hash), 1, fp);
 	flag += fread(&h->n_shift, sizeof(h->n_shift), 1, fp);
 	flag += fread(&h->tot, sizeof(h->tot), 1, fp);
+	if (flag < 5 || h->k > 63 || h->pre > 40 || h->n_shift > 63) {
+		fclose(fp); free(gfa_name); free(h); return 0;
+	}
 	CALLOC(h->h, 1<<h->pre);
 
 
@@ -1543,8 +1547,9 @@ int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_op
 	f_flag += fread(&absent, sizeof(absent), 1, fp);
 	if(absent != opt->number_of_round)
 	{
-		fprintf(stderr, "ERROR: different number of rounds!\n");
-		exit(1);
+		fprintf(stderr, "[WARN] index has different number of rounds; index ignored\n");
+		fclose(fp); free(gfa_name);
+		return 0;
 	}
 
 	f_flag += fread(&opt->hom_cov, sizeof(opt->hom_cov), 1, fp);
@@ -1556,6 +1561,7 @@ int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_op
 	
 	if(!load_All_reads(r, gfa_name))
 	{
+		reset_All_reads(r);
 		free(gfa_name);
 		return 0;
 	}
@@ -1565,12 +1571,19 @@ int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_op
 	sprintf(gfa_name, "%s.pt_flt.paf.bin", file_name);
 	fclose(fp); fp = fopen(gfa_name, "r"); uint64_t k;
     if (!fp) {
+		reset_All_reads(r);
         free(gfa_name);
         return 0;
     }
+	uint64_t pf_sz = 0;
+	{ struct stat st; if (fstat(fileno(fp), &st) == 0) pf_sz = (uint64_t)st.st_size; }
 	f_flag += fread(&(r->total_reads), sizeof(r->total_reads), 1, fp);
-	r->paf = (ma_hit_t_alloc*)malloc(sizeof(ma_hit_t_alloc)*r->total_reads);
-    r->reverse_paf = (ma_hit_t_alloc*)malloc(sizeof(ma_hit_t_alloc)*r->total_reads);
+	if (f_flag < 1 || (pf_sz && r->total_reads > pf_sz/4)) {
+		fclose(fp); reset_All_reads(r); free(gfa_name); return 0;
+	}
+	r->paf = (ma_hit_t_alloc*)calloc(r->total_reads, sizeof(ma_hit_t_alloc));
+    r->reverse_paf = (ma_hit_t_alloc*)calloc(r->total_reads, sizeof(ma_hit_t_alloc));
+    if (!r->paf || !r->reverse_paf) { fclose(fp); reset_All_reads(r); free(gfa_name); return 0; }
 	for (k = 0; k < r->total_reads; k++) {
         // init_ma_hit_t_alloc(&(r->paf[k]));
         init_ma_hit_t_alloc(&(r->reverse_paf[k]));
@@ -1582,9 +1595,14 @@ int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_op
 
         r->paf[k].buffer = NULL;
         if(r->paf[k].length == 0) continue;
-        
+        if (pf_sz && r->paf[k].length > pf_sz/sizeof(ma_hit_t)) {
+			fclose(fp); reset_All_reads(r); free(gfa_name); return 0;
+		}
+
         r->paf[k].buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*r->paf[k].length);
-        fread(r->paf[k].buffer, sizeof((*(r->paf[k].buffer))), r->paf[k].length, fp);
+        if (fread(r->paf[k].buffer, sizeof((*(r->paf[k].buffer))), r->paf[k].length, fp) != (size_t)r->paf[k].length) {
+			fclose(fp); reset_All_reads(r); free(gfa_name); return 0;
+		}
     }
 	fclose(fp);
 
