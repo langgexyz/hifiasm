@@ -110,6 +110,10 @@ uint64_t ha_ckpt_params_hash(void)
 	h = fnv1a(h, &o->min_hist_kmer_cnt, sizeof(o->min_hist_kmer_cnt));
 	h = fnv1a(h, &o->is_dbg_het_cnt, sizeof(o->is_dbg_het_cnt));
 	h = fnv1a(h, &o->hg_size, sizeof(o->hg_size));
+	/* --hom-cov overrides the auto-estimated hom coverage that drives every
+	   EC worker's high/low-occ thresholds; a change must reject old state */
+	h = fnv1a(h, &o->hom_global_coverage, sizeof(o->hom_global_coverage));
+	h = fnv1a(h, &o->hom_global_coverage_set, sizeof(o->hom_global_coverage_set));
 	h = fnv1a(h, &o->num_reads, sizeof(o->num_reads));
 
 	for (i = 0; i < o->num_reads; ++i) {

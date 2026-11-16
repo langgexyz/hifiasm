@@ -674,6 +674,20 @@ if [ -f ap.r1.ecstr ]; then
 else echo "SKIP AP(未产生 r1.ecstr)"; kill -9 $P 2>/dev/null; wait $P 2>/dev/null; fi
 fi
 
+if want AQ; then
+echo "===== [AQ] --hom-cov 变更 -> 快照/WAL/缓存一律拒绝重算 ====="
+rm -f aq.* aq40.*
+$HIFIASM -o aq -t$T --hom-cov 20 "$READS" >aq_a.log 2>&1 & P=$!
+wait_file "aq.r1.ecstr" 1024 $P && kill -9 $P; wait $P 2>/dev/null; sleep 1
+$HIFIASM -o aq -t$T --hom-cov 40 "$READS" >aq_b.log 2>&1
+if grep -q 'resumed checkpoint\|loaded corrected reads and overlaps' aq_b.log; then
+    echo "FAIL AQ(--hom-cov 变更后旧状态被复用)"; fail=1
+else echo "OK AQ(--hom-cov 变更 -> 拒绝旧状态, 干净重算)"; fi
+# 输出正确性:与 --hom-cov 40 全量基线 bit-exact
+$HIFIASM -o aq40 -t$T --hom-cov 40 "$READS" >aq40.log 2>&1
+cmp_gfa aq40 aq AQ
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
