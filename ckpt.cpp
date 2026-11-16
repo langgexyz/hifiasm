@@ -624,9 +624,9 @@ static int ec_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 
 	NEED(8); memcpy(&n, p, 8); p += 8;
 	NEED(1); f = *p++;
-	NEED(2*n);
+	if (n > (uint64_t)(e-p)/2) return 0;   /* bounds n; a forged n also cannot wrap 2*n */
 	if (scc.a) {
-		if (n > scc.a[rid].m) { REALLOC(scc.a[rid].a, n); scc.a[rid].m = n; }
+		if (n > scc.a[rid].m) { REALLOC(scc.a[rid].a, n); if (!scc.a[rid].a) return 0; scc.a[rid].m = n; }
 		scc.a[rid].n = n;
 		if (n) memcpy(scc.a[rid].a, p, 2*n);
 		if (scc.f) scc.f[rid] = f;
@@ -634,18 +634,18 @@ static int ec_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 	p += 2*n;
 
 	NEED(8); memcpy(&n, p, 8); p += 8;
-	NEED(2*n);
+	if (n > (uint64_t)(e-p)/2) return 0;
 	if (scb.a) {
-		if (n > scb.a[rid].m) { REALLOC(scb.a[rid].a, n); scb.a[rid].m = n; }
+		if (n > scb.a[rid].m) { REALLOC(scb.a[rid].a, n); if (!scb.a[rid].a) return 0; scb.a[rid].m = n; }
 		scb.a[rid].n = n;
 		if (n) memcpy(scb.a[rid].a, p, 2*n);
 	}
 	p += 2*n;
 
 	NEED(8); memcpy(&n, p, 8); p += 8;
-	NEED(2*n);
+	if (n > (uint64_t)(e-p)/2) return 0;
 	if (sca.a) {
-		if (n > sca.a[rid].m) { REALLOC(sca.a[rid].a, n); sca.a[rid].m = n; }
+		if (n > sca.a[rid].m) { REALLOC(sca.a[rid].a, n); if (!sca.a[rid].a) return 0; sca.a[rid].m = n; }
 		sca.a[rid].n = n;
 		if (n) memcpy(sca.a[rid].a, p, 2*n);
 	}
@@ -654,7 +654,7 @@ static int ec_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 	pa = &R_INF.paf[rid];
 	NEED(2); pa->is_fully_corrected = p[0]; pa->is_abnormal = p[1]; p += 2;
 	NEED(8); memcpy(&n, p, 8); p += 8;
-	NEED(n*sizeof(ma_hit_t));
+	if (n > (uint64_t)(e-p)/sizeof(ma_hit_t)) return 0;
 	if (pa->buffer) free(pa->buffer);
 	pa->length = pa->size = n;
 	pa->buffer = NULL;
@@ -668,7 +668,7 @@ static int ec_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 	pa = &R_INF.reverse_paf[rid];
 	NEED(2); pa->is_fully_corrected = p[0]; pa->is_abnormal = p[1]; p += 2;
 	NEED(8); memcpy(&n, p, 8); p += 8;
-	NEED(n*sizeof(ma_hit_t));
+	if (n > (uint64_t)(e-p)/sizeof(ma_hit_t)) return 0;
 	if (pa->buffer) free(pa->buffer);
 	pa->length = pa->size = n;
 	pa->buffer = NULL;
@@ -691,7 +691,7 @@ static int ov_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 #define NEED(k) do { if ((uint64_t)(e-p) < (k)) return 0; } while (0)
 	pa = &R_INF.paf[rid];
 	NEED(8); memcpy(&n, p, 8); p += 8;
-	NEED(n*sizeof(ma_hit_t));
+	if (n > (uint64_t)(e-p)/sizeof(ma_hit_t)) return 0;
 	if (pa->buffer) free(pa->buffer);
 	pa->length = pa->size = n;
 	pa->buffer = NULL;
@@ -700,7 +700,7 @@ static int ov_apply(ha_ckpt_stream_t *s, const uint8_t *r, uint64_t plen, uint64
 
 	pa = &R_INF.reverse_paf[rid];
 	NEED(8); memcpy(&n, p, 8); p += 8;
-	NEED(n*sizeof(ma_hit_t));
+	if (n > (uint64_t)(e-p)/sizeof(ma_hit_t)) return 0;
 	if (pa->buffer) free(pa->buffer);
 	pa->length = pa->size = n;
 	pa->buffer = NULL;

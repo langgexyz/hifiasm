@@ -124,7 +124,7 @@ void Print_H(hifiasm_opt_t* asm_opt)
     fprintf(stderr, "    -x FLOAT     max overlap drop ratio [%.2g]\n", asm_opt->max_drop_rate);
     fprintf(stderr, "    -y FLOAT     min overlap drop ratio [%.2g]\n", asm_opt->min_drop_rate);
     fprintf(stderr, "    -i           ignore saved read correction, overlaps and checkpoints\n");
-    fprintf(stderr, "    --ckpt-int   seconds between checkpoint fsyncs during correction/overlap [60]; 0 disables checkpoints\n");
+    fprintf(stderr, "    --ckpt-int   seconds between checkpoint fsyncs during correction/overlap [60]; 0 disables checkpoints; valid state auto-resumes after a crash\n");
     fprintf(stderr, "    -u           post-join step for contigs which may improve N50; 0 to disable; 1 to enable\n");
     fprintf(stderr, "                 [%u] and [%u] in default for the UL+HiFi assembly and the HiFi assembly, respectively\n",
                                       asm_opt->ul_pst_join, asm_opt->hifi_pst_join);

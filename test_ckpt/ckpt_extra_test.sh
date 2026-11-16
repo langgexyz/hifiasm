@@ -688,6 +688,79 @@ $HIFIASM -o aq40 -t$T --hom-cov 40 "$READS" >aq40.log 2>&1
 cmp_gfa aq40 aq AQ
 fi
 
+# ---- 反例组:构造"校验通过但语义恶意/陈旧混合"的脏状态,验证整体拒绝 ----
+# 共用:取真实 WAL 的前 40B header(自带匹配 params_hash),追加伪造记录
+if want AR; then
+echo "===== [AR] 伪造记录: CRC合法但 scc.n=2^63 (2*n 回绕绕过边界) ====="
+if command -v python3 >/dev/null; then
+rm -f fr.*
+$HIFIASM -o fr -t$T "$READS" >fr_a.log 2>&1 & P=$!
+wait_file "fr.r1.ecstr" 1024 $P && kill -9 $P; wait $P 2>/dev/null; sleep 1
+if [ -f fr.r1.ecstr ]; then
+python3 - <<'PYEOF'
+import zlib, struct
+d = open('fr.r1.ecstr','rb').read()
+hdr = d[:40]                                   # 保留真实 header(参数指纹匹配)
+# payload: trio(1)|het(4)|scc.n=2^63(8)|scc.f(1)  -> 2*n 回绕为 0
+payload = struct.pack('<B',0) + struct.pack('<I',0) + struct.pack('<Q',1<<63) + struct.pack('<B',0)
+rh = struct.pack('<H',0x5243) + struct.pack('<I',0) + struct.pack('<Q',0) + struct.pack('<Q',len(payload))
+crc = zlib.crc32(rh[2:]); crc = zlib.crc32(payload, crc)
+open('fr.r1.ecstr','wb').write(hdr + rh + payload + struct.pack('<I', crc & 0xffffffff))
+PYEOF
+$HIFIASM -o fr -t$T "$READS" >fr_b.log 2>&1
+RC=$?
+cmp_gfa bb fr AR
+if [ $RC -eq 0 ]; then echo "OK AR(伪造溢出记录被拒, 无内存投毒, 干净重算)"; else echo "FAIL AR rc=$RC"; fail=1; fi
+else echo "SKIP AR(未产生 r1.ecstr)"; fi
+else echo "SKIP AR(无 python3)"; fi
+fi
+
+if want AT; then
+echo "===== [AT] 伪造记录: rid 越界(合法 CRC) ====="
+if command -v python3 >/dev/null; then
+rm -f fo.*
+$HIFIASM -o fo -t$T "$READS" >fo_a.log 2>&1 & P=$!
+wait_file "fo.r1.ecstr" 1024 $P && kill -9 $P; wait $P 2>/dev/null; sleep 1
+if [ -f fo.r1.ecstr ]; then
+python3 - <<'PYEOF'
+import zlib, struct
+d = open('fo.r1.ecstr','rb').read()
+hdr = d[:40]
+payload = struct.pack('<B',0) + struct.pack('<I',0) + struct.pack('<Q',0) + struct.pack('<B',0)
+rh = struct.pack('<H',0x5243) + struct.pack('<I',0) + struct.pack('<Q',99999999) + struct.pack('<Q',len(payload))
+crc = zlib.crc32(rh[2:]); crc = zlib.crc32(payload, crc)
+open('fo.r1.ecstr','wb').write(hdr + rh + payload + struct.pack('<I', crc & 0xffffffff))
+PYEOF
+$HIFIASM -o fo -t$T "$READS" >fo_b.log 2>&1
+RC=$?
+cmp_gfa bb fo AT
+if [ $RC -eq 0 ]; then echo "OK AT(越界 rid 记录在 apply 前被拒)"; else echo "FAIL AT rc=$RC"; fail=1; fi
+else echo "SKIP AT(未产生 r1.ecstr)"; fi
+else echo "SKIP AT(无 python3)"; fi
+fi
+
+if want AS; then
+echo "===== [AS] 跨run陈旧WAL移植: 死run的r1记录注入新run -> 回放仍一致 ====="
+rm -f mg.* wal_A.bin
+# run A: r1 中途杀 -> snap r0 + wal r1(A代), 保存 WAL
+$HIFIASM -o mg -t$T "$READS" >mg_a.log 2>&1 & P=$!
+wait_file "mg.r1.ecstr" 2048 $P && kill -9 $P; wait $P 2>/dev/null; sleep 1
+if [ -f mg.r1.ecstr ]; then
+cp mg.r1.ecstr wal_A.bin
+rm -f mg.*
+# run B: 全新跑, r1 中途杀 -> snap r0 + wal r1(B代,部分)
+$HIFIASM -o mg -t$T "$READS" >mg_b.log 2>&1 & P=$!
+wait_file "mg.r1.ecstr" 512 $P && kill -9 $P; wait $P 2>/dev/null; sleep 1
+# 移植: 用 A 代 WAL 覆盖 B 代 WAL(同输入同参数 -> header 有效)
+cp wal_A.bin mg.r1.ecstr
+$HIFIASM -o mg -t$T "$READS" >mg_c.log 2>&1
+RC=$?
+R=$(sed -n 's/.*resumed \([0-9]*\)\/[0-9]* reads.*/\1/p' mg_c.log | head -1)
+cmp_gfa bb mg AS
+if [ $RC -eq 0 ]; then echo "OK AS(跨run陈旧WAL回放 resumed=${R:-NA}, bit-exact)"; else echo "FAIL AS rc=$RC"; fail=1; fi
+else echo "SKIP AS(未产生 r1.ecstr)"; kill -9 $P 2>/dev/null; wait $P 2>/dev/null; fi
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
