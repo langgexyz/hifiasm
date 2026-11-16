@@ -181,6 +181,107 @@ if [ -f "$ONT_READS" ]; then
 else echo "SKIP K: 无 $ONT_READS"; fi
 fi
 
+if want N; then
+echo "===== [N] graph 阶段 kill + resume (r2.snap+ovstr 接力) ====="
+rm -f gr.*
+if kill_run_log gr "graph: (build initial graph|ug extend|write contig)" "$HIFIASM -t$T $READS"; then
+    $HIFIASM -o gr -t$T "$READS" 2>gr_r.log
+    grep -q "resumed checkpoint of round 2" gr_r.log && echo "OK   N: 从 r2.snap 恢复" || { echo "FAIL N: 未按预期 resume"; fail=1; }
+    cmp_gfa bb gr N
+else echo "SKIP N"; fi
+fi
+
+if want O; then
+echo "===== [O] WAL 中段单字节损坏 -> 截断回放 ====="
+rm -f wc.*
+if kill_run wc "wc.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    OFF=$(( $(fsz wc.r1.ecstr) / 2 ))
+    printf '\xFF' | dd of=wc.r1.ecstr bs=1 seek=$OFF conv=notrunc 2>/dev/null
+    echo "[O] 已在 r1.ecstr 偏移 $OFF 处翻 1 字节"
+    $HIFIASM -o wc -t$T "$READS" 2>wc_r.log
+    N2=$(grep -o "resumed [0-9]*/[0-9]* reads" wc_r.log | tail -1)
+    echo "[O] WAL 回放: ${N2:-无}(截断点之前有效)"
+    cmp_gfa bb wc O
+else echo "SKIP O"; fi
+fi
+
+if want P; then
+echo "===== [P] 残留 .tmp 垃圾文件 -> 忽略 ====="
+rm -f st.*
+echo "GARBAGE_NOT_A_SNAPSHOT" > st.r0.snap.tmp
+head -c 4096 /dev/urandom > st.r1.ecstr.tmp 2>/dev/null || dd if=/dev/urandom of=st.r1.ecstr.tmp bs=4096 count=1 2>/dev/null
+if kill_run st "st.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    $HIFIASM -o st -t$T "$READS" 2>st_r.log
+    grep -q "resumed" st_r.log && echo "OK   P: .tmp 不影响 resume" || { echo "FAIL P"; fail=1; }
+    cmp_gfa bb st P
+else echo "SKIP P"; fi
+fi
+
+if want Q; then
+echo "===== [Q] fmt_ver 字节损坏 -> 拒绝 ====="
+rm -f fv.*
+if kill_run fv "fv.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    SNAP=$(ls fv.*.snap | head -1)
+    printf '\xEE' | dd of="$SNAP" bs=1 seek=8 conv=notrunc 2>/dev/null   # fmt_ver @offset8
+    $HIFIASM -o fv -t$T "$READS" 2>fv_r.log
+    grep -q "resumed checkpoint" fv_r.log && { echo "FAIL Q: fmt_ver 损坏仍 resume"; fail=1; } || echo "OK   Q: fmt_ver 不符被拒"
+    cmp_gfa bb fv Q
+else echo "SKIP Q"; fi
+fi
+
+if want R; then
+echo "===== [R] 同名输入文件被改 -> 拒绝 ====="
+rm -f df.*
+cp "$READS" reads_bak.fa
+if kill_run df "df.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    printf 'A' | dd of="$READS" bs=1 seek=100 conv=notrunc 2>/dev/null
+    $HIFIASM -o df -t$T "$READS" 2>df_r.log && RC=0 || RC=1
+    mv reads_bak.fa "$READS"   # 立刻恢复, 后续场景还要用
+    N=$(grep -c "resumed" df_r.log)
+    [ $RC -eq 0 ] && [ "$N" -eq 0 ] && echo "OK   R: 输入变化->拒 resume" || { echo "FAIL R: rc=$RC resumed=$N"; fail=1; }
+else mv reads_bak.fa "$READS"; echo "SKIP R"; fi
+fi
+
+if want S; then
+echo "===== [S] 快照回退链: 最新坏+旧的好 -> 用旧的 ====="
+rm -f fb.*
+if kill_run fb "fb.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    cp fb.r0.snap fb_snap.bak
+    if kill_run fb "fb.r2.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+        OFF=$(( $(fsz fb.r1.snap) / 2 ))
+        printf '\xFF' | dd of=fb.r1.snap bs=1 seek=$OFF conv=notrunc 2>/dev/null
+        cp fb_snap.bak fb.r0.snap
+        $HIFIASM -o fb -t$T "$READS" 2>fb_r.log
+        grep -q "resumed checkpoint of round 0" fb_r.log && echo "OK   S: 回退到 r0.snap" || { echo "FAIL S: 未回退 r0"; fail=1; }
+        cmp_gfa bb fb S
+    else echo "SKIP S(二段kill)"; fi
+else echo "SKIP S"; fi
+fi
+
+if want U; then
+echo "===== [U] reads+count 早期 kill -> 无 ckpt 干净重跑 ====="
+rm -f er.*
+if kill_run_log er "reads\+count" "$HIFIASM -t$T $READS"; then
+    $HIFIASM -o er -t$T "$READS" 2>er_r.log
+    cmp_gfa bb er U
+else echo "SKIP U"; fi
+fi
+
+if want V; then
+echo "===== [V] 成功完成后同 prefix 重跑 -> 幂等 ====="
+# bb 已完成且 ckpt 已 purge; 同 prefix 再跑必须全新计算且不恢复任何残留
+for g in $(pick_gfa bb); do echo "$(md "$g") $g"; done > bb.md5
+$HIFIASM -o bb -t$T "$READS" 2>bb2.log
+grep -q "resumed" bb2.log && { echo "FAIL V: 完成后同prefix仍 resume"; fail=1; } || echo "OK   V: 无残留可恢复"
+vok=1
+for g in $(pick_gfa bb); do
+    f=$(basename "$g")
+    a=$(grep " $f" bb.md5 | cut -d' ' -f1); b=$(md "$g")
+    [ "$a" = "$b" ] && echo "OK   V $f" || { echo "DIFF V $f"; vok=0; }
+done
+[ $vok -eq 1 ] || fail=1
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
