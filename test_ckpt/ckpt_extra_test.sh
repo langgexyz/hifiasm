@@ -198,7 +198,10 @@ echo "===== [N] graph 阶段 kill + resume (r2.snap+ovstr 接力) ====="
 rm -f gr.*
 if kill_run_log gr "graph: (build initial graph|ug extend|write contig)" "$HIFIASM -t$T $READS"; then
     $HIFIASM -o gr -t$T "$READS" 2>gr_r.log
-    grep -q "resumed checkpoint of round 2" gr_r.log && echo "OK   N: 从 r2.snap 恢复" || { echo "FAIL N: 未按预期 resume"; fail=1; }
+    # 两条合法恢复路径: ckpt(r2.snap+ovstr) 或 .ec/.ovlp 缓存(kill 前已写完)
+    if grep -q "resumed checkpoint of round 2" gr_r.log; then echo "OK   N: 从 r2.snap 恢复"
+    elif grep -q "loaded corrected reads" gr_r.log; then echo "OK   N: 从 ovlp 缓存恢复"
+    else echo "FAIL N: 未按预期 resume"; fail=1; fi
     cmp_gfa bb gr N
 else echo "SKIP N"; fi
 fi
@@ -488,6 +491,31 @@ $HIFIASM -o af -t$T $READS 2>af_d.log
 if grep -q "loaded corrected reads" af_d.log; then
     echo "FAIL AF-c(无stamp仍加载)"; fail=1
 else echo "OK AF-c(无stamp->拒)"; fi
+fi
+
+if want AG; then
+echo "===== [AG] --dbg-gfa 重载 debug graph 不被 ovlp.params stamp 误伤 ====="
+rm -f dg2.*
+$HIFIASM -o dg2 -t$T --dbg-gfa $READS 2>dg2_a.log
+$HIFIASM -o dg2 -t$T --dbg-gfa $READS 2>dg2_b.log
+if grep -q "debug gfa has been loaded" dg2_b.log; then
+    echo "OK AG(dbg-gfa 重载正常)"
+else
+    echo "FAIL AG(dbg-gfa 重载被挡)"; fail=1
+fi
+fi
+
+if want AH; then
+echo "===== [AH] 多输入: resume 加第二个文件 -> 必须拒绝 ====="
+head -2000 "$READS" > mi_a.fa; tail -1200 "$READS" > mi_b.fa
+rm -f mi.*
+$HIFIASM -o mi -t$T mi_a.fa 2>mi_a.log & P=$!
+wait_file "mi.r0.ecstr" 1024 $P && kill -9 $P; sleep 1
+$HIFIASM -o mi -t$T mi_a.fa mi_b.fa 2>mi_b.log
+if grep -qE "resumed" mi_b.log; then
+    echo "FAIL AH(输入集变了还 resume)"; fail=1
+else echo "OK AH(输入集变更被拒)"; fi
+rm -f mi_a.fa mi_b.fa
 fi
 
 echo "===== 汇总 ====="
