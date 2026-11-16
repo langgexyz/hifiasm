@@ -416,12 +416,12 @@ fi
 if want AD; then
 echo "===== [AD] 深变异输入(>4KB, size/mtime 相同) -> 必须拒绝 ckpt ====="
 # 旧指纹只哈希前4KB; 在 1MB 处改一个碱基并保持 size/mtime 不变, 验证全文件指纹
-cp "$READS" "$WORK/reads_ad.orig"
+cp "$READS" "reads_ad.orig"
 rm -f dp.*
 $HIFIASM -o dp -t$T "$READS" 2>dp_a.log & P=$!
-wait_file "$WORK/dp.r0.ecstr" 1024 $P && kill -9 $P
+wait_file "dp.r0.ecstr" 1024 $P && kill -9 $P
 sleep 1
-command -v python3 >/dev/null || { echo "SKIP AD(无 python3)"; cp "$WORK/reads_ad.orig" "$READS"; }
+command -v python3 >/dev/null || { echo "SKIP AD(无 python3)"; cp "reads_ad.orig" "$READS"; }
 if command -v python3 >/dev/null; then
 python3 - "$READS" <<'PY'
 import sys
@@ -431,7 +431,7 @@ while d[i:i+1] not in (b"A",b"C",b"G",b"T"): i += 1
 d[i:i+1] = b"C" if d[i:i+1] != b"C" else b"A"
 open(sys.argv[1],"wb").write(d)
 PY
-touch -r "$WORK/reads_ad.orig" "$READS" 2>/dev/null
+touch -r "reads_ad.orig" "$READS" 2>/dev/null
 $HIFIASM -o dp -t$T "$READS" 2>dp_b.log
 if grep -qE "resumed" dp_b.log; then
     echo "FAIL AD(深变异仍被 resume)"; fail=1
@@ -440,7 +440,54 @@ else
     cmp_gfa bb dp AD
 fi
 fi
-cp "$WORK/reads_ad.orig" "$READS"
+cp "reads_ad.orig" "$READS"
+fi
+
+if want AE; then
+echo "===== [AE] WAL rid字段损坏 -> CRC拒绝(不得错槽位应用) ====="
+# rec = MAGIC(2)|stage(4)|rid(8)|plen(8)|payload|crc(4); 翻第二条记录的 rid 低位
+rm -f rf.*
+if kill_run rf "rf.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    python3 - rf.r1.ecstr <<'PY' 2>/dev/null
+import sys, struct
+f = sys.argv[1]; d = bytearray(open(f,'rb').read())
+off = 40                       # 跳过文件头
+plen = struct.unpack('<Q', d[off+14:off+22])[0]
+off += 26 + plen               # 第2条记录起点
+d[off+6] ^= 0x01               # rid 最低位字节翻转 (rid±1, 仍在界内)
+open(f,'wb').write(d)
+print("flipped rid byte at", off+6)
+PY
+    $HIFIASM -o rf -t$T $READS 2>rf_r.log
+    grep -E "resumed" rf_r.log | head -2
+    cmp_gfa bb rf AE
+else echo "SKIP AE"; fi
+fi
+
+if want AF; then
+echo "===== [AF] .ec/.ovlp 缓存身份: 匹配加载/参数变拒绝/stamp缺拒绝 ====="
+# a) 同参重跑 -> 应加载缓存(快路径)
+rm -f af.*
+$HIFIASM -o af -t$T $READS 2>af_a.log
+if grep -q "loaded corrected reads" af_a.log; then echo "FAIL AF-a(首跑就加载?)"; fail=1; fi
+$HIFIASM -o af -t$T $READS 2>af_b.log
+if grep -q "loaded corrected reads" af_b.log; then
+    echo "OK AF-a(同参缓存命中)"
+    cmp_gfa bb af AF-a
+else echo "FAIL AF-a(同参缓存未命中)"; fail=1; fi
+# b) 改 --hg-size 重跑 -> 必须拒绝缓存, 重新纠错
+$HIFIASM -o af -t$T --hg-size 100m $READS 2>af_c.log
+if grep -q "loaded corrected reads" af_c.log; then
+    echo "FAIL AF-b(参数变了还加载旧缓存)"; fail=1
+elif grep -qE "ec round" af_c.log; then
+    echo "OK AF-b(参数变->拒缓存重算)"
+else echo "FAIL AF-b(既没加载也没重算?)"; fail=1; fi
+# c) 删 stamp 重跑 -> 必须拒绝(不可验证来源)
+rm -f af.ovlp.params
+$HIFIASM -o af -t$T $READS 2>af_d.log
+if grep -q "loaded corrected reads" af_d.log; then
+    echo "FAIL AF-c(无stamp仍加载)"; fail=1
+else echo "OK AF-c(无stamp->拒)"; fi
 fi
 
 echo "===== 汇总 ====="
