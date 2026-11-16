@@ -650,6 +650,30 @@ else echo "OK AO-b(.ec 已提交但无 params -> 归零重算)"; fi
 cmp_gfa bb ao AO-b
 fi
 
+if want AP; then
+echo "===== [AP] header-only WAL: 续写不重复 header、二次崩溃后记录存活 ====="
+rm -f ap.*
+$HIFIASM -o ap -t$T "$READS" >ap_a.log 2>&1 & P=$!
+wait_file "ap.r1.ecstr" 1024 $P && kill -9 $P; wait $P 2>/dev/null; sleep 1
+if [ -f ap.r1.ecstr ]; then
+    # 手术式截断成"只有 40B header、0 条记录"的 WAL(模拟写完 header 即断电)
+    truncate -s 40 ap.r1.ecstr
+    # run2: 在 header-only WAL 上续写, 不得追加第二个 header
+    $HIFIASM -o ap -t$T "$READS" >ap_b.log 2>&1 & P=$!
+    wait_file "ap.r1.ecstr" 100000 $P; sleep 2; kill -9 $P 2>/dev/null; wait $P 2>/dev/null; sleep 1
+    HDRS=$(LC_ALL=C grep -ao 'HICKPT01' ap.r1.ecstr 2>/dev/null | wc -l | tr -d ' ')
+    # run3: 再 resume —— run2 续写的记录应被回放(旧 bug 会因其前多出的第二
+    # 个 header 在 rescan 时把全部记录判为坏尾而丢弃)
+    $HIFIASM -o ap -t$T "$READS" >ap_c.log 2>&1
+    R3=$(sed -n 's/.*resumed \([0-9]*\)\/[0-9]* reads.*/\1/p' ap_c.log | head -1)
+    HIT=$(grep -c 'loaded corrected reads and overlaps' ap_c.log)
+    cmp_gfa bb ap AP
+    if [ "$HDRS" = "1" ] && { [ "${R3:-0}" -gt 0 ] || [ "$HIT" -gt 0 ]; }; then
+        echo "OK AP(header-only WAL 续写无重复 header, 二次崩溃记录存活/缓存命中)"
+    else echo "FAIL AP hdrs=$HDRS r3_resumed=${R3:-NA} hit=$HIT"; fail=1; fi
+else echo "SKIP AP(未产生 r1.ecstr)"; kill -9 $P 2>/dev/null; wait $P 2>/dev/null; fi
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail

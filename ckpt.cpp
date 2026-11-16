@@ -774,8 +774,10 @@ ha_ckpt_stream_t *ha_ckpt_stream_open(int stage, int64_t round, uint64_t n_reads
 	path = stream_name(stage, round);
 	s->path = path;
 
+	int hdr_ok = 0;
 	old = fopen(path, "r");
 	if (old && stream_rescan(s, old)) {
+		hdr_ok = 1;   /* header intact (truncate never drops it) */
 		fclose(old);
 		truncate(path, s->resume_off);   /* drop torn tail */
 		fprintf(stderr, "[M::%s::%.3f] ==> resumed %lu/%lu reads from %s\n",
@@ -790,7 +792,10 @@ ha_ckpt_stream_t *ha_ckpt_stream_open(int stage, int64_t round, uint64_t n_reads
 
 	s->fp = fopen(path, "a");
 	if (!s->fp) { free(s->done); free(path); pthread_mutex_destroy(&s->mut); free(s); return NULL; }
-	if (s->n_done == 0) wr_hdr(s->fp, (uint8_t)stage, round, n_reads);
+	/* write the header only when the stream has none: a valid header with
+	   zero records must not get a second header appended -- the duplicate
+	   magic would truncate all later records on the next rescan */
+	if (!hdr_ok) wr_hdr(s->fp, (uint8_t)stage, round, n_reads);
 	return s;
 }
 
