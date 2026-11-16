@@ -345,6 +345,39 @@ if kill_run ci "ci.r1.ecstr" "$THRESH" "$HIFIASM -t$T --ckpt-int 1 $READS"; then
 else echo "SKIP Z3"; fi
 fi
 
+if want Z4; then
+echo "===== [Z4] --dbg-gfa 门控 -> 不写任何 ckpt ====="
+rm -f dg4.*
+$HIFIASM -o dg4 -t$T --dbg-gfa "$READS" 2>dg4.log && RC=0 || RC=1
+NC=$(ls dg4.*.snap dg4.*.ecstr dg4.*.ovstr 2>/dev/null | wc -l | tr -d ' ')
+[ $RC -eq 0 ] && [ "$NC" -eq 0 ] && echo "OK   Z4: 门控生效, 0 个 ckpt 文件" || { echo "FAIL Z4: rc=$RC ckpt文件=$NC"; fail=1; }
+fi
+
+if want AA; then
+echo "===== [AA] snap 在但 WAL 被删 -> snap resume + 当轮重算 ====="
+rm -f aa.*
+if kill_run aa "aa.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    rm -f aa.r1.ecstr
+    $HIFIASM -o aa -t$T "$READS" 2>aa_r.log
+    grep -q "resumed checkpoint of round 0" aa_r.log && echo "OK   AA: snap 恢复" || { echo "FAIL AA"; fail=1; }
+    grep -o "resumed [0-9]*/[0-9]* reads" aa_r.log | tail -1 || echo "[AA] 当轮无 WAL, 全量重算(预期)"
+    cmp_gfa bb aa AA
+else echo "SKIP AA"; fi
+fi
+
+if want AB; then
+echo "===== [AB] -o 带子目录路径 -> ckpt 落在子目录 ====="
+mkdir -p subd; rm -f subd/* 2>/dev/null
+if kill_run subd/sd "subd/sd.r1.ecstr" "$THRESH" "$HIFIASM -t$T $READS"; then
+    ls subd/*.snap subd/*.ecstr >/dev/null 2>&1 && echo "OK   AB: ckpt 随 prefix 进子目录" || { echo "FAIL AB"; fail=1; }
+    $HIFIASM -o subd/sd -t$T "$READS" 2>sd_r.log
+    for g in $(pick_gfa bb); do
+        f=${g#bb.}
+        [ -f "subd/sd.$f" ] && [ "$(md subd/sd.$f)" = "$(md $g)" ] && echo "OK   AB $f" || { echo "DIFF AB $f"; fail=1; }
+    done
+else echo "SKIP AB"; fi
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
