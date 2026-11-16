@@ -13,7 +13,7 @@ T=${4:-4}
 THRESH=${5:-1000000}   # r1.ecstr 长到该字节数才 kill; 大数据集调大(如 512M)
 cd "$DIR" || exit 1
 
-pick_gfa() { ls ${1}.bp.p_ctg.gfa ${1}.bp.r_utg.gfa ${1}.bp.hap1.p_ctg.gfa ${1}.bp.hap2.p_ctg.gfa 2>/dev/null; }
+pick_gfa() { ls ${1}.*.gfa 2>/dev/null; }
 wait_file() { # $1=file $2=minsize $3=timeout_s
     local t=0
     while [ $t -lt ${3:-300} ]; do

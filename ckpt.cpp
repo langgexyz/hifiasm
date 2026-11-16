@@ -100,6 +100,7 @@ uint64_t ha_ckpt_params_hash(void)
 	h = fnv1a(h, &o->max_kmer_cnt, sizeof(o->max_kmer_cnt));
 	h = fnv1a(h, &o->min_hist_kmer_cnt, sizeof(o->min_hist_kmer_cnt));
 	h = fnv1a(h, &o->is_dbg_het_cnt, sizeof(o->is_dbg_het_cnt));
+	h = fnv1a(h, &o->hg_size, sizeof(o->hg_size));
 	h = fnv1a(h, &o->num_reads, sizeof(o->num_reads));
 
 	for (i = 0; i < o->num_reads; ++i) {
