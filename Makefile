@@ -2,7 +2,7 @@ CXX=		g++
 CC=			gcc
 CXXFLAGS=	-g -O3 -msse4.2 -mpopcnt -fomit-frame-pointer -Wall
 CFLAGS=		$(CXXFLAGS)
-CPPFLAGS=
+CPPFLAGS=	-DHA_BUILD_STAMP=\"$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)\"
 INCLUDES=
 OBJS=		CommandLines.o Process_Read.o Assembly.o Hash_Table.o \
 			POA.o Correct.o Levenshtein_distance.o Overlaps.o Trio.o kthread.o Purge_Dups.o \

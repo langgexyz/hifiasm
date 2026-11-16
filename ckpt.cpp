@@ -65,14 +65,23 @@ static uint64_t fnv1a(uint64_t h, const void *p, uint64_t n)
 
 uint64_t ha_ckpt_params_hash(void)
 {
+	/* memoized: params and inputs are fixed for the process lifetime, and the
+	 * whole-file fingerprint below is expensive on multi-GB inputs */
+	static uint64_t memo;
+	static int memo_ok;
 	uint64_t h = 14695981039346656037ULL;
 	const hifiasm_opt_t *o = &asm_opt;
 	int i;
 	struct stat st;
-	char buf[4096];
+	char buf[1<<20];
 	FILE *fp;
 
+	if (memo_ok) return memo;
+
 	h = fnv1a(h, HA_VERSION, strlen(HA_VERSION));
+#ifdef HA_BUILD_STAMP
+	h = fnv1a(h, HA_BUILD_STAMP, strlen(HA_BUILD_STAMP));
+#endif
 	h = fnv1a(h, &o->k_mer_length, sizeof(o->k_mer_length));
 	h = fnv1a(h, &o->mz_win, sizeof(o->mz_win));
 	h = fnv1a(h, &o->bf_shift, sizeof(o->bf_shift));
@@ -112,11 +121,13 @@ uint64_t ha_ckpt_params_hash(void)
 		}
 		fp = fopen(o->read_file_names[i], "r");
 		if (fp) {
-			size_t got = fread(buf, 1, sizeof(buf), fp);
-			h = fnv1a(h, buf, got);
+			size_t got;
+			while ((got = fread(buf, 1, sizeof(buf), fp)) > 0)
+				h = fnv1a(h, buf, got);
 			fclose(fp);
 		}
 	}
+	memo = h; memo_ok = 1;
 	return h;
 }
 

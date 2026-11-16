@@ -401,6 +401,36 @@ else
 fi
 fi
 
+if want AD; then
+echo "===== [AD] 深变异输入(>4KB, size/mtime 相同) -> 必须拒绝 ckpt ====="
+# 旧指纹只哈希前4KB; 在 1MB 处改一个碱基并保持 size/mtime 不变, 验证全文件指纹
+cp "$READS" "$WORK/reads_ad.orig"
+rm -f dp.*
+$HIFIASM -o dp -t$T "$READS" 2>dp_a.log & P=$!
+wait_file "$WORK/dp.r0.ecstr" 1024 $P && kill -9 $P
+sleep 1
+command -v python3 >/dev/null || { echo "SKIP AD(无 python3)"; cp "$WORK/reads_ad.orig" "$READS"; }
+if command -v python3 >/dev/null; then
+python3 - "$READS" <<'PY'
+import sys
+d = bytearray(open(sys.argv[1],"rb").read())
+i = 1000000
+while d[i:i+1] not in (b"A",b"C",b"G",b"T"): i += 1
+d[i:i+1] = b"C" if d[i:i+1] != b"C" else b"A"
+open(sys.argv[1],"wb").write(d)
+PY
+touch -r "$WORK/reads_ad.orig" "$READS" 2>/dev/null
+$HIFIASM -o dp -t$T "$READS" 2>dp_b.log
+if grep -qE "resumed" dp_b.log; then
+    echo "FAIL AD(深变异仍被 resume)"; fail=1
+else
+    echo "OK(深变异被拒)"
+    cmp_gfa bb dp AD
+fi
+fi
+cp "$WORK/reads_ad.orig" "$READS"
+fi
+
 echo "===== 汇总 ====="
 [ $fail -eq 0 ] && echo "  全部通过" || echo "  !! 存在失败项, 见上方 FAIL/DIFF"
 exit $fail
