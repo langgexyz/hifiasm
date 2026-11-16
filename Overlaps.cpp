@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #define __STDC_LIMIT_MACROS
 #include <stdint.h>
+#include <sys/stat.h>
 #include "Overlaps.h"
 #include "ksort.h"
 #include "Process_Read.h"
@@ -12,6 +13,7 @@
 #include "hic.h"
 #include "kthread.h"
 #include "progress.h"
+#include "ckpt.h"
 #include "tovlp.h"
 #include "Assembly.h"
 #include "rcut.h"
@@ -23342,6 +23344,10 @@ int load_ma_hit_ts(ma_hit_t_alloc** x, char* read_file_name)
     long long i, k;
     int f_flag;
     f_flag = fread(&n_read, sizeof(n_read), 1, fp);
+    uint64_t fsz = 0;
+    { struct stat st; if (fstat(fileno(fp), &st) == 0) fsz = (uint64_t)st.st_size; }
+    /* each entry costs >=4B on disk; reject impossible counts before malloc */
+    if (f_flag != 1 || n_read <= 0 || (fsz && n_read > (long long)(fsz/4))) { fclose(fp); free(index_name); return 0; }
     (*x) = (ma_hit_t_alloc*)malloc(sizeof(ma_hit_t_alloc)*n_read);
 
 
@@ -23354,7 +23360,8 @@ int load_ma_hit_ts(ma_hit_t_alloc** x, char* read_file_name)
 
         (*x)[i].buffer = NULL;
         if((*x)[i].length == 0) continue;
-        
+        /* a stored buffer can't exceed the file it lives in */
+        if (fsz && (*x)[i].length > fsz/sizeof(ma_hit_t)) { fclose(fp); free(index_name); return 0; }
         (*x)[i].buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*(*x)[i].length);
 
         for (k = 0; k < (*x)[i].length; k++)
@@ -23466,14 +23473,13 @@ void write_ma_hit_ts(ma_hit_t_alloc* x, long long n_read, char* read_file_name)
     }
 
 
-    free(index_name);
     int bad = ferror(fp);
     if (fflush(fp) != 0) bad = 1;
 	if (fsync(fileno(fp)) != 0) bad = 1;
     if (fclose(fp) != 0) bad = 1;
 	if (bad || rename(tmp_name, index_name) != 0) { unlink(tmp_name); fprintf(stderr, "ma_hit_ts write failed.\n"); }
     else fprintf(stderr, "ma_hit_ts has been written.\n");
-    free(tmp_name);
+    free(index_name); free(tmp_name);
 }
 
 
@@ -23588,6 +23594,12 @@ void write_all_data_to_disk(ma_hit_t_alloc* sources, ma_hit_t_alloc* reverse_sou
 	sprintf(gfa_name, "%s.ovlp.reverse", output_file_name);
 	write_ma_hit_ts(reverse_sources, RNF->total_reads, gfa_name);
 
+	/* provenance stamp: load_all_data_from_disk refuses the cache when the
+	 * correction-relevant params/inputs differ (see ckpt params hash) */
+	{	sprintf(gfa_name, "%s.ovlp.params", output_file_name);
+		FILE *phfp = fopen(gfa_name, "wb");
+		if (phfp) { uint64_t ph = ha_ckpt_params_hash(); fwrite(&ph, sizeof(ph), 1, phfp); fclose(phfp); } }
+
 	free(gfa_name);
     fprintf(stderr, "bin files have been written.\n");
     if(asm_opt.bin_only) exit(0);
@@ -23598,6 +23610,12 @@ char* output_file_name, ma_hit_t_alloc** reverse_sources, R_to_U* ruIndex, all_u
 int load_all_data_from_disk(ma_hit_t_alloc **sources, ma_hit_t_alloc **reverse_sources, char* output_file_name)
 {
 	char* gfa_name = (char*)malloc(strlen(output_file_name)+25);
+	/* refuse a stale/unverifiable cache: stamp must exist and match */
+	sprintf(gfa_name, "%s.ovlp.params", output_file_name);
+	{	FILE *phfp = fopen(gfa_name, "rb"); uint64_t ph = 0, ok = 0;
+		if (phfp) { ok = (fread(&ph, sizeof(ph), 1, phfp) == 1 && ph == ha_ckpt_params_hash()); fclose(phfp); }
+		if (!ok) { free(gfa_name); return 0; } }
+
 	sprintf(gfa_name, "%s.ec", output_file_name);
 	if (!load_All_reads(&R_INF, gfa_name)) {
 		free(gfa_name);
